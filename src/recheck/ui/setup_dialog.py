@@ -24,8 +24,11 @@ class SetupDialog(QDialog):
         *,
         title: str = "Initial Setup",
         initial_values: dict[str, str] | None = None,
+        tr=None,
     ) -> None:
         super().__init__(parent)
+        self._tr = tr or (lambda key, **kwargs: key)
+        self._title = title
         self.setWindowTitle(title)
         self.setModal(True)
         self.resize(600, 240)
@@ -35,67 +38,73 @@ class SetupDialog(QDialog):
         default_snapshot = values.get("snapshot_dir") or str(Path.home() / "AppData" / "Local" / "ReCheck" / "snapshots")
 
         layout = QVBoxLayout(self)
-        helper = QLabel("Configure project settings for Re:Check v0.1.")
-        helper.setWordWrap(True)
-        layout.addWidget(helper)
+        self.helper = QLabel()
+        self.helper.setWordWrap(True)
+        layout.addWidget(self.helper)
 
         form = QFormLayout()
         layout.addLayout(form)
+        self.form = form
 
         self.project_name = QLineEdit(values.get("name", ""))
-        form.addRow("Project Name", self.project_name)
+        form.addRow("", self.project_name)
 
         self.root_folder = QLineEdit(default_root)
-        form.addRow("Root Folder", self._with_browse(self.root_folder, self._browse_root))
+        form.addRow("", self._with_browse(self.root_folder, self._browse_root))
 
         self.snapshot_dir = QLineEdit(default_snapshot)
-        form.addRow("Snapshot Directory", self._with_browse(self.snapshot_dir, self._browse_snapshot))
+        form.addRow("", self._with_browse(self.snapshot_dir, self._browse_snapshot))
 
         self.initial_scope = QLineEdit(values.get("initial_scope_folders", ""))
         self.initial_scope.setPlaceholderText("folderA, folderB")
-        form.addRow("Initial Compare Folders", self.initial_scope)
+        form.addRow("", self.initial_scope)
 
         self.exclude_rules = QLineEdit(values.get("exclude_rules", ""))
         self.exclude_rules.setPlaceholderText("*.tmp, *.bak, __pycache__")
-        form.addRow("Exclude Rules", self.exclude_rules)
+        form.addRow("", self.exclude_rules)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self._accept_checked)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons.accepted.connect(self._accept_checked)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+        self._retranslate()
 
     def _with_browse(self, line_edit: QLineEdit, callback) -> QWidget:
         wrapper = QWidget(self)
         row = QHBoxLayout(wrapper)
         row.setContentsMargins(0, 0, 0, 0)
         row.addWidget(line_edit, 1)
-        browse = QPushButton("Browse")
+        browse = QPushButton(self._tr("dialog.setup.browse"))
         browse.clicked.connect(callback)
         row.addWidget(browse)
         return wrapper
 
     def _browse_root(self) -> None:
-        selected = QFileDialog.getExistingDirectory(self, "Select Root Folder", self.root_folder.text())
+        selected = QFileDialog.getExistingDirectory(self, self._tr("dialog.setup.root_folder"), self.root_folder.text())
         if selected:
             self.root_folder.setText(selected)
 
     def _browse_snapshot(self) -> None:
-        selected = QFileDialog.getExistingDirectory(self, "Select Snapshot Directory", self.snapshot_dir.text())
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            self._tr("dialog.setup.snapshot_dir"),
+            self.snapshot_dir.text(),
+        )
         if selected:
             self.snapshot_dir.setText(selected)
 
     def _accept_checked(self) -> None:
         if not self.project_name.text().strip():
-            QMessageBox.warning(self, "Validation", "Project name is required.")
+            QMessageBox.warning(self, self._tr("dialog.validation"), self._tr("dialog.validation.project_required"))
             return
         if not self.root_folder.text().strip():
-            QMessageBox.warning(self, "Validation", "Root folder is required.")
+            QMessageBox.warning(self, self._tr("dialog.validation"), self._tr("dialog.validation.root_required"))
             return
         if not self.snapshot_dir.text().strip():
-            QMessageBox.warning(self, "Validation", "Snapshot directory is required.")
+            QMessageBox.warning(self, self._tr("dialog.validation"), self._tr("dialog.validation.snapshot_required"))
             return
         if not Path(self.root_folder.text().strip()).exists():
-            QMessageBox.warning(self, "Validation", "Root folder does not exist.")
+            QMessageBox.warning(self, self._tr("dialog.validation"), self._tr("dialog.validation.root_missing"))
             return
         self.accept()
 
@@ -109,3 +118,12 @@ class SetupDialog(QDialog):
             "initial_scope_folders": scope_folders,
             "exclude_rules": exclude_rules,
         }
+
+    def _retranslate(self) -> None:
+        self.setWindowTitle(self._title)
+        self.helper.setText(self._tr("dialog.setup.helper"))
+        self.form.setWidget(0, QFormLayout.ItemRole.LabelRole, QLabel(self._tr("dialog.setup.project_name")))
+        self.form.setWidget(1, QFormLayout.ItemRole.LabelRole, QLabel(self._tr("dialog.setup.root_folder")))
+        self.form.setWidget(2, QFormLayout.ItemRole.LabelRole, QLabel(self._tr("dialog.setup.snapshot_dir")))
+        self.form.setWidget(3, QFormLayout.ItemRole.LabelRole, QLabel(self._tr("dialog.setup.initial_scope")))
+        self.form.setWidget(4, QFormLayout.ItemRole.LabelRole, QLabel(self._tr("dialog.setup.exclude")))

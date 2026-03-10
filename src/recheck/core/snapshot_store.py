@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 
 from recheck.core.file_scanner import scan_folder
-from recheck.core.models import ProjectConfig, SnapshotFileRecord, SnapshotManifest, SnapshotRecord
-from recheck.utils.path_utils import timestamp_id, utc_now_iso
+from recheck.core.models import (
+    AppSettings,
+    ProjectConfig,
+    SnapshotFileRecord,
+    SnapshotManifest,
+    SnapshotRecord,
+)
+from recheck.core.preview_cache import PreviewCacheStore
+from recheck.utils.path_utils import normalize_relpath, timestamp_id, utc_now_iso
 
 
 class SnapshotStore:
-    def __init__(self) -> None:
-        pass
+    def __init__(self, preview_cache_store: PreviewCacheStore) -> None:
+        self.preview_cache_store = preview_cache_store
 
     def _index_file(self, project: ProjectConfig) -> Path:
         return Path(project.snapshot_dir) / "index.json"
@@ -38,28 +44,42 @@ class SnapshotStore:
         records.sort(key=lambda item: item.created_at, reverse=True)
         return records
 
-    def save_snapshot(self, project: ProjectConfig, name: str | None = None) -> SnapshotRecord:
+    def save_snapshot(
+        self,
+        project: ProjectConfig,
+        *,
+        settings: AppSettings,
+        name: str | None = None,
+        source_folder: str | None = None,
+    ) -> SnapshotRecord:
         snapshot_id = timestamp_id("s")
         created_at = utc_now_iso()
         snapshot_name = name.strip() if name and name.strip() else snapshot_id
+        snapshot_source = str(Path(source_folder or project.root_folder))
 
         snapshot_root = self._snapshot_folder(project, snapshot_id)
-        files_dir = snapshot_root / "files"
-        files_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_root.mkdir(parents=True, exist_ok=True)
 
-        scanned_files = scan_folder(project.root_folder, project.exclude_rules)
+        scanned_files = scan_folder(snapshot_source, project.exclude_rules)
+        generation = self.preview_cache_store.cache_snapshot_files(
+            snapshot_id=snapshot_id,
+            source_folder=snapshot_source,
+            scanned_files=scanned_files,
+            settings=settings,
+        )
+        cached_hashes = generation.file_hashes
+
         manifest_files: list[SnapshotFileRecord] = []
         for scanned in scanned_files:
-            source = Path(scanned.absolute_path)
-            target = files_dir / scanned.relative_path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
+            rel = normalize_relpath(scanned.relative_path)
             manifest_files.append(
                 SnapshotFileRecord(
-                    relative_path=scanned.relative_path,
+                    relative_path=rel,
                     file_name=scanned.file_name,
                     size=scanned.size,
                     modified_time=scanned.modified_time,
+                    snapshot_created_time=created_at,
+                    cached_blob_hash=cached_hashes.get(rel),
                 )
             )
 
@@ -67,7 +87,8 @@ class SnapshotStore:
             snapshot_id=snapshot_id,
             name=snapshot_name,
             created_at=created_at,
-            files_dir=str(files_dir),
+            source_folder=snapshot_source,
+            preview_generation_id=generation.generation_id,
             files=manifest_files,
         )
         manifest_path = snapshot_root / "manifest.json"
@@ -78,10 +99,11 @@ class SnapshotStore:
             snapshot_id=snapshot_id,
             name=snapshot_name,
             created_at=created_at,
-            source_folder=project.root_folder,
+            source_folder=snapshot_source,
             file_count=len(manifest_files),
             manifest_path=str(manifest_path),
-            files_dir=str(files_dir),
+            preview_generation_id=generation.generation_id,
+            cached_file_count=len(cached_hashes),
         )
         records = self._load_index(project)
         records.append(record)
@@ -97,11 +119,27 @@ class SnapshotStore:
                 raise FileNotFoundError(f"Snapshot manifest does not exist: {manifest_path}")
             with manifest_path.open("r", encoding="utf-8") as handle:
                 payload = json.load(handle)
-            return SnapshotManifest.from_dict(payload)
+            manifest = SnapshotManifest.from_dict(payload)
+            if not manifest.source_folder:
+                manifest.source_folder = record.source_folder
+            if not manifest.preview_generation_id:
+                manifest.preview_generation_id = record.preview_generation_id
+            return manifest
         raise KeyError(f"Snapshot not found: {snapshot_id}")
 
     def get_snapshot(self, project: ProjectConfig, snapshot_id: str) -> SnapshotRecord | None:
         for record in self._load_index(project):
             if record.snapshot_id == snapshot_id:
                 return record
+        return None
+
+    def resolve_preview_path(self, manifest: SnapshotManifest, relative_path: str) -> str | None:
+        normalized_rel = normalize_relpath(relative_path)
+        cached = self.preview_cache_store.resolve_cached_file(manifest.preview_generation_id, normalized_rel)
+        if cached:
+            return cached
+
+        source_candidate = Path(manifest.source_folder) / normalized_rel
+        if source_candidate.exists():
+            return str(source_candidate)
         return None

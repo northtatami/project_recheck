@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from pathlib import Path
 
 from recheck.core.models import CompareLogRecord, DiffEntry, ProjectConfig, SnapshotFileRecord, SnapshotManifest
 from recheck.utils.path_utils import normalize_relpath, timestamp_id, utc_now_iso
@@ -65,9 +64,6 @@ def compare_snapshots(
         counts[status] += 1
 
         file_name = (compare_item.file_name if compare_item else base_item.file_name) if (base_item or compare_item) else ""
-        base_path = str(Path(base.files_dir) / rel_path) if base_item else None
-        compare_path = str(Path(compare.files_dir) / rel_path) if compare_item else None
-
         entries.append(
             DiffEntry(
                 status=status,
@@ -77,8 +73,8 @@ def compare_snapshots(
                 compare_modified_time=compare_item.modified_time if compare_item else None,
                 base_size=base_item.size if base_item else None,
                 compare_size=compare_item.size if compare_item else None,
-                base_file_path=base_path,
-                compare_file_path=compare_path,
+                base_file_path=None,
+                compare_file_path=None,
             )
         )
 

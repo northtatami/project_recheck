@@ -37,11 +37,42 @@ class ProjectConfig:
 
 
 @dataclass
+class AppSettings:
+    language: str = "ja"
+    preview_cache_max_generations: int = 5
+    preview_cache_max_total_size_gb: float = 10.0
+    preview_cache_target_extensions: list[str] = field(default_factory=list)
+    created_at: str = ""
+    updated_at: str = ""
+
+    @property
+    def preview_cache_max_total_size_bytes(self) -> int:
+        size_gb = max(0.1, float(self.preview_cache_max_total_size_gb))
+        return int(size_gb * 1024 * 1024 * 1024)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AppSettings":
+        return cls(
+            language=str(data.get("language", "ja")),
+            preview_cache_max_generations=int(data.get("preview_cache_max_generations", 5)),
+            preview_cache_max_total_size_gb=float(data.get("preview_cache_max_total_size_gb", 10.0)),
+            preview_cache_target_extensions=list(data.get("preview_cache_target_extensions", [])),
+            created_at=str(data.get("created_at", "")),
+            updated_at=str(data.get("updated_at", "")),
+        )
+
+
+@dataclass
 class SnapshotFileRecord:
     relative_path: str
     file_name: str
     size: int
     modified_time: str
+    snapshot_created_time: str = ""
+    cached_blob_hash: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -53,6 +84,8 @@ class SnapshotFileRecord:
             file_name=data["file_name"],
             size=int(data["size"]),
             modified_time=data["modified_time"],
+            snapshot_created_time=str(data.get("snapshot_created_time", "")),
+            cached_blob_hash=data.get("cached_blob_hash"),
         )
 
 
@@ -64,7 +97,8 @@ class SnapshotRecord:
     source_folder: str
     file_count: int
     manifest_path: str
-    files_dir: str
+    preview_generation_id: str | None = None
+    cached_file_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -78,7 +112,8 @@ class SnapshotRecord:
             source_folder=data["source_folder"],
             file_count=int(data["file_count"]),
             manifest_path=data["manifest_path"],
-            files_dir=data["files_dir"],
+            preview_generation_id=data.get("preview_generation_id"),
+            cached_file_count=int(data.get("cached_file_count", 0)),
         )
 
 
@@ -87,7 +122,8 @@ class SnapshotManifest:
     snapshot_id: str
     name: str
     created_at: str
-    files_dir: str
+    source_folder: str
+    preview_generation_id: str | None
     files: list[SnapshotFileRecord]
 
     def to_dict(self) -> dict[str, Any]:
@@ -101,7 +137,8 @@ class SnapshotManifest:
             snapshot_id=data["snapshot_id"],
             name=data["name"],
             created_at=data["created_at"],
-            files_dir=data["files_dir"],
+            source_folder=str(data.get("source_folder", "")),
+            preview_generation_id=data.get("preview_generation_id"),
             files=[SnapshotFileRecord.from_dict(item) for item in data.get("files", [])],
         )
 
@@ -165,4 +202,26 @@ class CompareLogRecord:
             counts=dict(data.get("counts", {})),
             entries=[DiffEntry.from_dict(item) for item in data.get("entries", [])],
             log_path=data["log_path"],
+        )
+
+
+@dataclass
+class PreviewCacheGeneration:
+    generation_id: str
+    snapshot_id: str
+    created_at: str
+    source_folder: str
+    file_hashes: dict[str, str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PreviewCacheGeneration":
+        return cls(
+            generation_id=str(data["generation_id"]),
+            snapshot_id=str(data["snapshot_id"]),
+            created_at=str(data["created_at"]),
+            source_folder=str(data.get("source_folder", "")),
+            file_hashes=dict(data.get("file_hashes", {})),
         )

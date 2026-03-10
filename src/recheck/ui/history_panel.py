@@ -22,21 +22,23 @@ class HistoryPanel(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._tr = lambda key, **kwargs: key
         self._snapshot_by_id: dict[str, SnapshotRecord] = {}
         self._compare_by_id: dict[str, CompareLogRecord] = {}
 
         layout = QVBoxLayout(self)
         title_row = QHBoxLayout()
-        title = QLabel("History")
-        title.setObjectName("historyTitle")
-        title_row.addWidget(title)
+        self.title = QLabel("History")
+        self.title.setObjectName("historyTitle")
+        title_row.addWidget(self.title)
         title_row.addStretch(1)
-        close_button = QPushButton("Close")
-        close_button.clicked.connect(self.close_requested.emit)
-        title_row.addWidget(close_button)
+        self.close_button = QPushButton("Close")
+        self.close_button.clicked.connect(self.close_requested.emit)
+        title_row.addWidget(self.close_button)
         layout.addLayout(title_row)
 
-        layout.addWidget(QLabel("Snapshots"))
+        self.snapshots_label = QLabel("Snapshots")
+        layout.addWidget(self.snapshots_label)
         self.snapshot_list = QListWidget()
         layout.addWidget(self.snapshot_list, 1)
 
@@ -50,7 +52,8 @@ class HistoryPanel(QWidget):
         snapshot_actions.addStretch(1)
         layout.addLayout(snapshot_actions)
 
-        layout.addWidget(QLabel("Saved Compares"))
+        self.compares_label = QLabel("Saved Compares")
+        layout.addWidget(self.compares_label)
         self.compare_list = QListWidget()
         layout.addWidget(self.compare_list, 1)
 
@@ -60,6 +63,7 @@ class HistoryPanel(QWidget):
         compare_actions.addWidget(self.open_compare_button)
         compare_actions.addStretch(1)
         layout.addLayout(compare_actions)
+        self.retranslate(self._tr)
 
     def set_snapshots(self, snapshots: list[SnapshotRecord]) -> None:
         self._snapshot_by_id = {item.snapshot_id: item for item in snapshots}
@@ -112,3 +116,13 @@ class HistoryPanel(QWidget):
         compare_id = self._selected_compare_id()
         if compare_id:
             self.open_compare_requested.emit(compare_id)
+
+    def retranslate(self, tr) -> None:
+        self._tr = tr
+        self.title.setText(tr("history.title"))
+        self.close_button.setText(tr("history.close"))
+        self.snapshots_label.setText(tr("history.snapshots"))
+        self.base_button.setText(tr("history.set_base"))
+        self.compare_button.setText(tr("history.set_compare"))
+        self.compares_label.setText(tr("history.saved_compares"))
+        self.open_compare_button.setText(tr("history.open_result"))
