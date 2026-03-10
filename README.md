@@ -14,7 +14,6 @@ Re:Check is a local Windows GUI tool for reviewing folder diffs with scope selec
 - Project create/save/load/switch
 - Initial setup dialog
 - Snapshot save and Base/Compare snapshot selection
-- Base/Compare direct folder pick (creates and assigns snapshots immediately)
 - Scope pane:
   - Whole
   - Selected folder
@@ -32,11 +31,17 @@ Re:Check is a local Windows GUI tool for reviewing folder diffs with scope selec
   - Video optional external-open fallback
 - History button + hidden history panel
 - Automatic compare-log save on compare execution
+- Compare confirmation when current root state is unsaved:
+  - Save and Compare
+  - Compare Without Saving
+  - Cancel
+- Preview pane show/hide toggle (3-pane structure is preserved)
 - App settings:
   - Language: Japanese / English
   - Preview cache generations
   - Preview cache total size cap
   - Preview cache target extensions
+- External folder snapshot import is available from project `...` menu
 
 ## Snapshot Metadata vs Preview Cache
 
@@ -64,7 +69,7 @@ Re:Check is a local Windows GUI tool for reviewing folder diffs with scope selec
 The implementation was validated locally with offscreen smoke checks for:
 - lightweight snapshot creation
 - preview cache creation and pruning
-- Base/Compare folder-pick workflow
+- project-menu external folder snapshot import workflow
 - language switching (Japanese/English)
 - audio waveform sample generation
 - PDF first-page preview path and fallback index path

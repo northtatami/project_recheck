@@ -5,7 +5,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QBrush, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 
 from recheck import __version__
 from recheck.core.compare_service import CompareLogStore, compare_snapshots
+from recheck.core.file_scanner import scan_folder
 from recheck.core.models import AppSettings, CompareLogRecord, DiffEntry, ProjectConfig, SnapshotManifest, SnapshotRecord
 from recheck.core.preview_cache import PreviewCacheStore
 from recheck.core.project_store import ProjectStore
@@ -76,6 +77,8 @@ class RecheckMainWindow(QMainWindow):
         self.latest_counts = {status: 0 for status in STATUSES}
         self.base_manifest: SnapshotManifest | None = None
         self.compare_manifest: SnapshotManifest | None = None
+        self.main_splitter: QSplitter | None = None
+        self._last_splitter_sizes = [290, 530, 560]
 
         self.setWindowTitle("Re:Check - Diff Review for folders")
         self.resize(1580, 920)
@@ -98,15 +101,16 @@ class RecheckMainWindow(QMainWindow):
 
         root.addWidget(self._build_header())
 
-        body = QSplitter(Qt.Orientation.Horizontal)
-        body.addWidget(self._build_scope_pane())
-        body.addWidget(self._build_diff_pane())
-        body.addWidget(self._build_preview_pane())
-        body.setStretchFactor(0, 1)
-        body.setStretchFactor(1, 2)
-        body.setStretchFactor(2, 2)
-        body.setSizes([290, 530, 560])
-        root.addWidget(body, 1)
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter.addWidget(self._build_scope_pane())
+        self.main_splitter.addWidget(self._build_diff_pane())
+        self.main_splitter.addWidget(self._build_preview_pane())
+        self.main_splitter.setStretchFactor(0, 1)
+        self.main_splitter.setStretchFactor(1, 2)
+        self.main_splitter.setStretchFactor(2, 2)
+        self.main_splitter.setCollapsible(2, True)
+        self.main_splitter.setSizes(self._last_splitter_sizes)
+        root.addWidget(self.main_splitter, 1)
 
         self.history_panel = HistoryPanel(self)
         self.history_panel.set_base_requested.connect(self._set_base_from_history)
@@ -124,6 +128,7 @@ class RecheckMainWindow(QMainWindow):
         shortcut = QShortcut(QKeySequence("Ctrl+K"), self)
         shortcut.activated.connect(self._show_command_palette_stub)
         self.statusBar().showMessage(self._t("msg.ready"))
+        self._apply_preview_pane_visibility(self.settings.preview_pane_visible, persist=False, notify=False)
 
     def _build_header(self) -> QWidget:
         panel = QFrame()
@@ -155,6 +160,10 @@ class RecheckMainWindow(QMainWindow):
         self.history_button.clicked.connect(self._toggle_history_panel)
         actions.addWidget(self.history_button)
 
+        self.preview_toggle_button = QPushButton()
+        self.preview_toggle_button.clicked.connect(self._toggle_preview_pane)
+        actions.addWidget(self.preview_toggle_button)
+
         self.settings_button = QPushButton()
         self.settings_button.setFixedWidth(40)
         self.settings_button.clicked.connect(self._open_settings_menu)
@@ -170,7 +179,7 @@ class RecheckMainWindow(QMainWindow):
         self.project_selector = QComboBox()
         self.project_selector.currentIndexChanged.connect(self._on_project_changed)
         self.project_selector.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        row2.addWidget(self.project_selector, 2)
+        row2.addWidget(self.project_selector, 1)
 
         self.project_menu_button = QPushButton("...")
         self.project_menu_button.setFixedWidth(36)
@@ -180,20 +189,12 @@ class RecheckMainWindow(QMainWindow):
         self.base_label = QLabel()
         row2.addWidget(self.base_label)
         self.base_selector = QComboBox()
-        row2.addWidget(self.base_selector, 1)
-        self.base_folder_button = QPushButton()
-        self.base_folder_button.setFixedWidth(36)
-        self.base_folder_button.clicked.connect(lambda: self._create_snapshot_from_folder("base"))
-        row2.addWidget(self.base_folder_button)
+        row2.addWidget(self.base_selector, 2)
 
         self.compare_label = QLabel()
         row2.addWidget(self.compare_label)
         self.compare_selector = QComboBox()
-        row2.addWidget(self.compare_selector, 1)
-        self.compare_folder_button = QPushButton()
-        self.compare_folder_button.setFixedWidth(36)
-        self.compare_folder_button.clicked.connect(lambda: self._create_snapshot_from_folder("compare"))
-        row2.addWidget(self.compare_folder_button)
+        row2.addWidget(self.compare_selector, 2)
 
         self.snapshot_button = QPushButton()
         self.snapshot_button.clicked.connect(self._save_snapshot)
@@ -275,6 +276,7 @@ class RecheckMainWindow(QMainWindow):
             button = QPushButton()
             button.setCheckable(True)
             button.clicked.connect(lambda checked=False, s=status: self._set_status_filter(s))
+            button.setObjectName(f"summary_{status}")
             cards.addWidget(button)
             self.summary_buttons[status] = button
             self.summary_group.addButton(button)
@@ -369,6 +371,14 @@ class RecheckMainWindow(QMainWindow):
             }
             QPushButton#primaryButton:hover { background: #235f91; }
             QPushButton:checked { background: #d3e8ff; border-color: #84b4e8; color: #16364f; }
+            QPushButton#summary_added { background: #e9f6ed; border-color: #bcdcc6; }
+            QPushButton#summary_removed { background: #faecec; border-color: #e8c3c3; }
+            QPushButton#summary_modified { background: #ecf3fa; border-color: #c2d7ee; }
+            QPushButton#summary_unchanged { background: #f2f3f5; border-color: #d2d6dc; }
+            QPushButton#summary_added:checked { background: #cfead8; }
+            QPushButton#summary_removed:checked { background: #f2d8d8; }
+            QPushButton#summary_modified:checked { background: #d7e6f6; }
+            QPushButton#summary_unchanged:checked { background: #e5e7eb; }
             QLineEdit, QComboBox, QTreeWidget, QTableWidget, QListWidget, QPlainTextEdit {
                 border: 1px solid #c9d7e5;
                 border-radius: 7px;
@@ -389,12 +399,14 @@ class RecheckMainWindow(QMainWindow):
         self.app_subtitle.setText(self._t("app.subtitle"))
         self.compare_button.setText(self._t("action.compare"))
         self.history_button.setText(self._t("action.history"))
+        if self.settings.preview_pane_visible:
+            self.preview_toggle_button.setText(self._t("action.toggle_preview_hide"))
+        else:
+            self.preview_toggle_button.setText(self._t("action.toggle_preview_show"))
         self.settings_button.setText(self._t("action.settings"))
         self.project_label.setText(self._t("label.project"))
         self.base_label.setText(self._t("label.base"))
         self.compare_label.setText(self._t("label.compare"))
-        self.base_folder_button.setText(self._t("button.pick_folder"))
-        self.compare_folder_button.setText(self._t("button.pick_folder"))
         self.snapshot_button.setText(self._t("action.save_snapshot"))
         self.date_compare_button.setText(self._t("action.compare_by_date"))
 
@@ -456,7 +468,6 @@ class RecheckMainWindow(QMainWindow):
                 name=str(values["name"]),
                 root_folder=str(values["root_folder"]),
                 snapshot_dir=str(values["snapshot_dir"]),
-                initial_scope_folders=list(values["initial_scope_folders"]),
                 exclude_rules=list(values["exclude_rules"]),
             )
             self._load_projects()
@@ -477,6 +488,14 @@ class RecheckMainWindow(QMainWindow):
         project_id = self.project_selector.itemData(index)
         if not project_id:
             return
+        # Prevent previous-project selections from leaking into current project state.
+        self.base_manifest = None
+        self.compare_manifest = None
+        self.base_selector.clear()
+        self.compare_selector.clear()
+        self.diff_table.setRowCount(0)
+        self.preview_info.setText(self._t("preview.info.empty"))
+
         project = self.project_store.load_project(str(project_id))
         self.current_project = project
 
@@ -509,6 +528,10 @@ class RecheckMainWindow(QMainWindow):
             self._set_combo_value(self.base_selector, self.current_project.last_base_snapshot_id)
         if self.current_project.last_compare_snapshot_id:
             self._set_combo_value(self.compare_selector, self.current_project.last_compare_snapshot_id)
+        if self.base_selector.count() == 0:
+            self.base_selector.setCurrentIndex(-1)
+        if self.compare_selector.count() == 0:
+            self.compare_selector.setCurrentIndex(-1)
         self.history_panel.set_snapshots(self.snapshots)
 
     def _refresh_compare_logs(self) -> None:
@@ -549,15 +572,18 @@ class RecheckMainWindow(QMainWindow):
         self._set_combo_value(self.compare_selector, snapshot.snapshot_id)
         self.statusBar().showMessage(self._t("msg.snapshot_saved", name=snapshot.name))
 
-    def _create_snapshot_from_folder(self, role: str) -> None:
+    def _import_external_folder_as_snapshot(self) -> None:
         if not self.current_project:
             return
-        title_key = "dialog.pick_base_folder" if role == "base" else "dialog.pick_compare_folder"
-        picked = QFileDialog.getExistingDirectory(self, self._t(title_key), self.current_project.root_folder)
+        picked = QFileDialog.getExistingDirectory(
+            self,
+            self._t("dialog.external_snapshot.title"),
+            self.current_project.root_folder,
+        )
         if not picked:
             return
-        folder_name = Path(picked).name or role
-        snapshot_name = f"{role}_{folder_name}"
+        folder_name = Path(picked).name or "external"
+        snapshot_name = f"external_{folder_name}"
         snapshot = self.snapshot_store.save_snapshot(
             self.current_project,
             settings=self.settings,
@@ -565,10 +591,8 @@ class RecheckMainWindow(QMainWindow):
             source_folder=picked,
         )
         self._refresh_snapshots()
-        target_combo = self.base_selector if role == "base" else self.compare_selector
-        self._set_combo_value(target_combo, snapshot.snapshot_id)
-        self.mode_whole.setChecked(True)
-        self.statusBar().showMessage(self._t("msg.snapshot_saved", name=snapshot.name))
+        self._set_combo_value(self.compare_selector, snapshot.snapshot_id)
+        self.statusBar().showMessage(self._t("msg.external_snapshot_created", name=snapshot.name))
 
     def _current_scope_mode(self) -> str:
         if self.mode_selected.isChecked():
@@ -599,8 +623,6 @@ class RecheckMainWindow(QMainWindow):
                 rel_path = current.data(0, Qt.ItemDataRole.UserRole)
                 if rel_path:
                     return [str(rel_path)]
-            if self.current_project and self.current_project.initial_scope_folders:
-                return [self.current_project.initial_scope_folders[0]]
             return []
         return selected
 
@@ -613,8 +635,31 @@ class RecheckMainWindow(QMainWindow):
             QMessageBox.warning(self, self._t("action.compare"), self._t("msg.compare_missing"))
             return
 
-        self.base_manifest = self.snapshot_store.load_manifest(self.current_project, str(base_id))
-        self.compare_manifest = self.snapshot_store.load_manifest(self.current_project, str(compare_id))
+        if self._is_current_root_state_unsaved():
+            decision = self._ask_compare_with_unsaved_state()
+            if decision == "cancel":
+                return
+            if decision == "save":
+                selected_base_id = str(base_id)
+                snapshot = self.snapshot_store.save_snapshot(
+                    self.current_project,
+                    settings=self.settings,
+                    name=f"compare_{self.current_project.name}",
+                    source_folder=self.current_project.root_folder,
+                )
+                self._refresh_snapshots()
+                self._set_combo_value(self.base_selector, selected_base_id)
+                self._set_combo_value(self.compare_selector, snapshot.snapshot_id)
+                compare_id = snapshot.snapshot_id
+
+        self._run_compare(str(base_id), str(compare_id))
+
+    def _run_compare(self, base_id: str, compare_id: str) -> None:
+        if not self.current_project:
+            return
+
+        self.base_manifest = self.snapshot_store.load_manifest(self.current_project, base_id)
+        self.compare_manifest = self.snapshot_store.load_manifest(self.current_project, compare_id)
         scope_mode = self._current_scope_mode()
         scope_folders = self._selected_scope_folders()
 
@@ -634,21 +679,63 @@ class RecheckMainWindow(QMainWindow):
         self.compare_log_store.save_compare_log(
             project=self.current_project,
             project_storage_dir=storage_dir,
-            base_snapshot_id=str(base_id),
-            compare_snapshot_id=str(compare_id),
+            base_snapshot_id=base_id,
+            compare_snapshot_id=compare_id,
             scope_mode=scope_mode,
             scope_folders=scope_folders,
             result=result,
         )
         self._refresh_compare_logs()
 
-        self.current_project.last_base_snapshot_id = str(base_id)
-        self.current_project.last_compare_snapshot_id = str(compare_id)
+        self.current_project.last_base_snapshot_id = base_id
+        self.current_project.last_compare_snapshot_id = compare_id
         self.project_store.save_project(self.current_project)
 
         scope_label = ", ".join(scope_folders) if scope_folders else self._t("msg.preview_scope_whole")
         self.current_path_label.setText(f"Path: {scope_label}")
         self.statusBar().showMessage(self._t("msg.compare_done"))
+
+    def _ask_compare_with_unsaved_state(self) -> str:
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Icon.Question)
+        msg.setWindowTitle(self._t("dialog.compare_prompt.title"))
+        msg.setText(self._t("dialog.compare_prompt.text"))
+        save_btn = msg.addButton(self._t("dialog.compare_prompt.save_compare"), QMessageBox.ButtonRole.AcceptRole)
+        compare_btn = msg.addButton(self._t("dialog.compare_prompt.compare_only"), QMessageBox.ButtonRole.DestructiveRole)
+        cancel_btn = msg.addButton(self._t("dialog.compare_prompt.cancel"), QMessageBox.ButtonRole.RejectRole)
+        msg.setDefaultButton(save_btn)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked == save_btn:
+            return "save"
+        if clicked == compare_btn:
+            return "compare_only"
+        if clicked == cancel_btn:
+            return "cancel"
+        return "cancel"
+
+    def _is_current_root_state_unsaved(self) -> bool:
+        if not self.current_project:
+            return False
+        root = Path(self.current_project.root_folder).resolve()
+        try:
+            current_scan = scan_folder(str(root), self.current_project.exclude_rules)
+        except Exception:
+            return False
+        current_map = {item.relative_path: (item.size, item.modified_time) for item in current_scan}
+
+        latest_root_snapshot: SnapshotRecord | None = None
+        for snapshot in self.snapshots:
+            if Path(snapshot.source_folder).resolve() == root:
+                latest_root_snapshot = snapshot
+                break
+
+        if latest_root_snapshot is None:
+            return len(current_map) > 0
+
+        manifest = self.snapshot_store.load_manifest(self.current_project, latest_root_snapshot.snapshot_id)
+        snapshot_map = {item.relative_path: (item.size, item.modified_time) for item in manifest.files}
+        return current_map != snapshot_map
 
     def _status_label(self, status: str) -> str:
         return self._t(f"status.{status}")
@@ -688,9 +775,10 @@ class RecheckMainWindow(QMainWindow):
         self.diff_table.setRowCount(len(filtered))
 
         for row, entry in enumerate(filtered):
+            file_display = f"{entry.file_name}\n{entry.relative_path}"
             row_items = [
                 self._status_label(entry.status),
-                entry.file_name,
+                file_display,
                 entry.relative_path,
                 entry.base_modified_time or "-",
                 entry.compare_modified_time or "-",
@@ -701,7 +789,20 @@ class RecheckMainWindow(QMainWindow):
                 item = QTableWidgetItem(value)
                 if col == 0:
                     item.setData(Qt.ItemDataRole.UserRole, asdict(entry))
+                    status_colors = {
+                        "added": QColor("#e9f6ed"),
+                        "removed": QColor("#faecec"),
+                        "modified": QColor("#ecf3fa"),
+                        "unchanged": QColor("#f2f3f5"),
+                    }
+                    item.setBackground(QBrush(status_colors.get(entry.status, QColor("#ffffff"))))
+                if col == 1:
+                    item.setToolTip(entry.relative_path)
+                if col == 2:
+                    item.setToolTip(entry.relative_path)
+                    item.setForeground(QBrush(QColor("#5f7387")))
                 self.diff_table.setItem(row, col, item)
+            self.diff_table.setRowHeight(row, 40)
         self.diff_table.setSortingEnabled(True)
 
         if filtered:
@@ -817,11 +918,6 @@ class RecheckMainWindow(QMainWindow):
                 parent_item.addChild(item)
                 rel_to_item[rel] = item
 
-        for rel in self.current_project.initial_scope_folders:
-            item = rel_to_item.get(normalize_relpath(rel))
-            if item:
-                item.setCheckState(0, Qt.CheckState.Checked)
-
         self.scope_tree.expandToDepth(1)
         self.scope_tree.blockSignals(False)
 
@@ -891,6 +987,35 @@ class RecheckMainWindow(QMainWindow):
             self.history_dock.show()
             self.history_dock.raise_()
 
+    def _toggle_preview_pane(self) -> None:
+        self._apply_preview_pane_visibility(not self.settings.preview_pane_visible)
+
+    def _apply_preview_pane_visibility(self, visible: bool, *, persist: bool = True, notify: bool = True) -> None:
+        if self.main_splitter is None:
+            return
+        sizes = self.main_splitter.sizes()
+        if visible:
+            if len(self._last_splitter_sizes) == 3 and self._last_splitter_sizes[2] > 0:
+                self.main_splitter.setSizes(self._last_splitter_sizes)
+            else:
+                self.main_splitter.setSizes([290, 530, 560])
+            if notify:
+                self.statusBar().showMessage(self._t("msg.preview_shown"))
+        else:
+            if len(sizes) == 3 and sizes[2] > 0:
+                self._last_splitter_sizes = sizes
+            left = sizes[0] if len(sizes) > 0 else 290
+            center = sizes[1] if len(sizes) > 1 else 530
+            right = sizes[2] if len(sizes) > 2 else 560
+            self.main_splitter.setSizes([left + right // 2, center + right // 2, 0])
+            if notify:
+                self.statusBar().showMessage(self._t("msg.preview_hidden"))
+
+        self.settings.preview_pane_visible = visible
+        if persist:
+            self.settings_store.save(self.settings)
+        self._retranslate_ui()
+
     def _set_base_from_history(self, snapshot_id: str) -> None:
         self._set_combo_value(self.base_selector, snapshot_id)
 
@@ -934,13 +1059,13 @@ class RecheckMainWindow(QMainWindow):
         root_action.triggered.connect(self._change_root_folder)
         menu.addAction(root_action)
 
-        scope_action = QAction(self._t("project.menu.edit_scope"), self)
-        scope_action.triggered.connect(self._edit_initial_scope)
-        menu.addAction(scope_action)
-
         exclude_action = QAction(self._t("project.menu.edit_exclude"), self)
         exclude_action.triggered.connect(self._edit_exclude_rules)
         menu.addAction(exclude_action)
+
+        import_action = QAction(self._t("project.menu.import_external_snapshot"), self)
+        import_action.triggered.connect(self._import_external_folder_as_snapshot)
+        menu.addAction(import_action)
 
         open_storage = QAction(self._t("project.menu.open_storage"), self)
         open_storage.triggered.connect(self._open_storage_folder)
@@ -963,7 +1088,6 @@ class RecheckMainWindow(QMainWindow):
                 "name": self.current_project.name,
                 "root_folder": self.current_project.root_folder,
                 "snapshot_dir": self.current_project.snapshot_dir,
-                "initial_scope_folders": ", ".join(self.current_project.initial_scope_folders),
                 "exclude_rules": ", ".join(self.current_project.exclude_rules),
             },
         )
@@ -973,7 +1097,6 @@ class RecheckMainWindow(QMainWindow):
         self.current_project.name = str(values["name"])
         self.current_project.root_folder = str(values["root_folder"])
         self.current_project.snapshot_dir = str(values["snapshot_dir"])
-        self.current_project.initial_scope_folders = list(values["initial_scope_folders"])
         self.current_project.exclude_rules = list(values["exclude_rules"])
         self.project_store.save_project(self.current_project)
         self._load_projects()
@@ -1002,22 +1125,6 @@ class RecheckMainWindow(QMainWindow):
         if not path:
             return
         self.current_project.root_folder = path
-        self.project_store.save_project(self.current_project)
-        self._refresh_scope_tree()
-
-    def _edit_initial_scope(self) -> None:
-        if not self.current_project:
-            return
-        existing = ", ".join(self.current_project.initial_scope_folders)
-        value, ok = QInputDialog.getText(
-            self,
-            self._t("dialog.scope_edit.title"),
-            self._t("dialog.scope_edit.label"),
-            text=existing,
-        )
-        if not ok:
-            return
-        self.current_project.initial_scope_folders = [item.strip() for item in value.split(",") if item.strip()]
         self.project_store.save_project(self.current_project)
         self._refresh_scope_tree()
 

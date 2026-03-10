@@ -55,10 +55,6 @@ class SetupDialog(QDialog):
         self.snapshot_dir = QLineEdit(default_snapshot)
         form.addRow("", self._with_browse(self.snapshot_dir, self._browse_snapshot))
 
-        self.initial_scope = QLineEdit(values.get("initial_scope_folders", ""))
-        self.initial_scope.setPlaceholderText("folderA, folderB")
-        form.addRow("", self.initial_scope)
-
         self.exclude_rules = QLineEdit(values.get("exclude_rules", ""))
         self.exclude_rules.setPlaceholderText("*.tmp, *.bak, __pycache__")
         form.addRow("", self.exclude_rules)
@@ -109,13 +105,11 @@ class SetupDialog(QDialog):
         self.accept()
 
     def values(self) -> dict[str, object]:
-        scope_folders = [item.strip() for item in self.initial_scope.text().split(",") if item.strip()]
         exclude_rules = [item.strip() for item in self.exclude_rules.text().split(",") if item.strip()]
         return {
             "name": self.project_name.text().strip(),
             "root_folder": self.root_folder.text().strip(),
             "snapshot_dir": self.snapshot_dir.text().strip(),
-            "initial_scope_folders": scope_folders,
             "exclude_rules": exclude_rules,
         }
 
@@ -125,5 +119,4 @@ class SetupDialog(QDialog):
         self.form.setWidget(0, QFormLayout.ItemRole.LabelRole, QLabel(self._tr("dialog.setup.project_name")))
         self.form.setWidget(1, QFormLayout.ItemRole.LabelRole, QLabel(self._tr("dialog.setup.root_folder")))
         self.form.setWidget(2, QFormLayout.ItemRole.LabelRole, QLabel(self._tr("dialog.setup.snapshot_dir")))
-        self.form.setWidget(3, QFormLayout.ItemRole.LabelRole, QLabel(self._tr("dialog.setup.initial_scope")))
-        self.form.setWidget(4, QFormLayout.ItemRole.LabelRole, QLabel(self._tr("dialog.setup.exclude")))
+        self.form.setWidget(3, QFormLayout.ItemRole.LabelRole, QLabel(self._tr("dialog.setup.exclude")))

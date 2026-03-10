@@ -74,7 +74,6 @@ class ProjectStore:
         name: str,
         root_folder: str,
         snapshot_dir: str,
-        initial_scope_folders: list[str],
         exclude_rules: list[str],
     ) -> ProjectConfig:
         project_id = f"{safe_slug(name)}_{timestamp_id('p')}"
@@ -83,7 +82,6 @@ class ProjectStore:
             name=name.strip(),
             root_folder=str(Path(root_folder)),
             snapshot_dir=str(Path(snapshot_dir)),
-            initial_scope_folders=initial_scope_folders,
             exclude_rules=exclude_rules,
         )
         return self.save_project(project)

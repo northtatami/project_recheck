@@ -34,6 +34,7 @@ class AppSettingsStore:
             preview_cache_max_generations=5,
             preview_cache_max_total_size_gb=10.0,
             preview_cache_target_extensions=list(PREVIEW_CACHE_DEFAULT_EXTENSIONS),
+            preview_pane_visible=True,
         )
 
     def load(self) -> AppSettings:
@@ -50,6 +51,7 @@ class AppSettingsStore:
         settings.preview_cache_target_extensions = normalize_extensions(settings.preview_cache_target_extensions)
         if settings.language not in {"ja", "en"}:
             settings.language = "ja"
+        settings.preview_pane_visible = bool(settings.preview_pane_visible)
         return settings
 
     def save(self, settings: AppSettings) -> AppSettings:

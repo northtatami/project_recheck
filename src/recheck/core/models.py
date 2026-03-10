@@ -10,7 +10,6 @@ class ProjectConfig:
     name: str
     root_folder: str
     snapshot_dir: str
-    initial_scope_folders: list[str] = field(default_factory=list)
     exclude_rules: list[str] = field(default_factory=list)
     last_base_snapshot_id: str | None = None
     last_compare_snapshot_id: str | None = None
@@ -27,7 +26,6 @@ class ProjectConfig:
             name=data["name"],
             root_folder=data["root_folder"],
             snapshot_dir=data["snapshot_dir"],
-            initial_scope_folders=data.get("initial_scope_folders", []),
             exclude_rules=data.get("exclude_rules", []),
             last_base_snapshot_id=data.get("last_base_snapshot_id"),
             last_compare_snapshot_id=data.get("last_compare_snapshot_id"),
@@ -42,6 +40,7 @@ class AppSettings:
     preview_cache_max_generations: int = 5
     preview_cache_max_total_size_gb: float = 10.0
     preview_cache_target_extensions: list[str] = field(default_factory=list)
+    preview_pane_visible: bool = True
     created_at: str = ""
     updated_at: str = ""
 
@@ -60,6 +59,7 @@ class AppSettings:
             preview_cache_max_generations=int(data.get("preview_cache_max_generations", 5)),
             preview_cache_max_total_size_gb=float(data.get("preview_cache_max_total_size_gb", 10.0)),
             preview_cache_target_extensions=list(data.get("preview_cache_target_extensions", [])),
+            preview_pane_visible=bool(data.get("preview_pane_visible", True)),
             created_at=str(data.get("created_at", "")),
             updated_at=str(data.get("updated_at", "")),
         )
