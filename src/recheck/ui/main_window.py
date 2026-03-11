@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import copy
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QAction, QBrush, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -78,6 +79,9 @@ class RecheckMainWindow(QMainWindow):
         self.base_manifest: SnapshotManifest | None = None
         self.compare_manifest: SnapshotManifest | None = None
         self.main_splitter: QSplitter | None = None
+        self.preview_panel: QFrame | None = None
+        self.preview_content: QWidget | None = None
+        self.preview_collapsed_hint: QLabel | None = None
         self._last_splitter_sizes = [290, 530, 560]
 
         self.setWindowTitle("Re:Check - Diff Review for folders")
@@ -160,10 +164,6 @@ class RecheckMainWindow(QMainWindow):
         self.history_button.clicked.connect(self._toggle_history_panel)
         actions.addWidget(self.history_button)
 
-        self.preview_toggle_button = QPushButton()
-        self.preview_toggle_button.clicked.connect(self._toggle_preview_pane)
-        actions.addWidget(self.preview_toggle_button)
-
         self.settings_button = QPushButton()
         self.settings_button.setFixedWidth(40)
         self.settings_button.clicked.connect(self._open_settings_menu)
@@ -189,12 +189,16 @@ class RecheckMainWindow(QMainWindow):
         self.base_label = QLabel()
         row2.addWidget(self.base_label)
         self.base_selector = QComboBox()
-        row2.addWidget(self.base_selector, 2)
+        row2.addWidget(self.base_selector, 3)
+
+        self.base_compare_hint = QLabel()
+        self.base_compare_hint.setObjectName("flowHint")
+        row2.addWidget(self.base_compare_hint)
 
         self.compare_label = QLabel()
         row2.addWidget(self.compare_label)
         self.compare_selector = QComboBox()
-        row2.addWidget(self.compare_selector, 2)
+        row2.addWidget(self.compare_selector, 3)
 
         self.snapshot_button = QPushButton()
         self.snapshot_button.clicked.connect(self._save_snapshot)
@@ -302,20 +306,41 @@ class RecheckMainWindow(QMainWindow):
     def _build_preview_pane(self) -> QWidget:
         panel = QFrame()
         panel.setObjectName("previewPane")
+        self.preview_panel = panel
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
+        title_row = QHBoxLayout()
         self.preview_title = QLabel()
         self.preview_title.setObjectName("paneTitle")
-        layout.addWidget(self.preview_title)
+        title_row.addWidget(self.preview_title)
+        title_row.addStretch(1)
+        self.preview_collapse_button = QPushButton("<")
+        self.preview_collapse_button.setObjectName("previewCollapseButton")
+        self.preview_collapse_button.setFixedWidth(34)
+        self.preview_collapse_button.clicked.connect(self._toggle_preview_pane)
+        title_row.addWidget(self.preview_collapse_button)
+        layout.addLayout(title_row)
+
+        self.preview_collapsed_hint = QLabel()
+        self.preview_collapsed_hint.setObjectName("previewCollapsedHint")
+        self.preview_collapsed_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_collapsed_hint.hide()
+        layout.addWidget(self.preview_collapsed_hint)
+
+        self.preview_content = QWidget()
+        content_layout = QVBoxLayout(self.preview_content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(8)
+
         self.preview_helper = QLabel()
         self.preview_helper.setObjectName("paneHelp")
-        layout.addWidget(self.preview_helper)
+        content_layout.addWidget(self.preview_helper)
 
         self.preview_info = QLabel()
         self.preview_info.setWordWrap(True)
-        layout.addWidget(self.preview_info)
+        content_layout.addWidget(self.preview_info)
 
         sides = QSplitter(Qt.Orientation.Horizontal)
         self.base_preview = FilePreviewColumn("Base", tr=self._t)
@@ -323,7 +348,7 @@ class RecheckMainWindow(QMainWindow):
         sides.addWidget(self.base_preview)
         sides.addWidget(self.compare_preview)
         sides.setSizes([1, 1])
-        layout.addWidget(sides, 1)
+        content_layout.addWidget(sides, 1)
 
         action_row = QHBoxLayout()
         self.open_base_button = QPushButton()
@@ -336,7 +361,9 @@ class RecheckMainWindow(QMainWindow):
         self.open_explorer_button.clicked.connect(self._open_in_explorer)
         action_row.addWidget(self.open_explorer_button)
         action_row.addStretch(1)
-        layout.addLayout(action_row)
+        content_layout.addLayout(action_row)
+
+        layout.addWidget(self.preview_content, 1)
 
         self.base_preview.open_button.clicked.connect(lambda: self._open_path(self.base_preview.current_path))
         self.compare_preview.open_button.clicked.connect(lambda: self._open_path(self.compare_preview.current_path))
@@ -355,7 +382,15 @@ class RecheckMainWindow(QMainWindow):
             QLabel#appSubtitle { color: #5f7387; padding-top: 2px; }
             QLabel#paneTitle { font-size: 15px; font-weight: 700; color: #20455f; }
             QLabel#paneHelp { color: #607487; }
+            QLabel#flowHint { color: #70879b; padding-left: 4px; padding-right: 4px; }
             QLabel#historyTitle { font-size: 16px; font-weight: 700; }
+            QLabel#previewCollapsedHint {
+                color: #5f7387;
+                border: 1px dashed #c9d7e5;
+                border-radius: 6px;
+                background: #f2f6fa;
+                padding: 6px;
+            }
             QPushButton {
                 background: #e7edf3;
                 border: 1px solid #ccdae7;
@@ -370,6 +405,7 @@ class RecheckMainWindow(QMainWindow):
                 font-weight: 600;
             }
             QPushButton#primaryButton:hover { background: #235f91; }
+            QPushButton#previewCollapseButton { padding: 4px 8px; font-weight: 700; }
             QPushButton:checked { background: #d3e8ff; border-color: #84b4e8; color: #16364f; }
             QPushButton#summary_added { background: #e9f6ed; border-color: #bcdcc6; }
             QPushButton#summary_removed { background: #faecec; border-color: #e8c3c3; }
@@ -399,13 +435,10 @@ class RecheckMainWindow(QMainWindow):
         self.app_subtitle.setText(self._t("app.subtitle"))
         self.compare_button.setText(self._t("action.compare"))
         self.history_button.setText(self._t("action.history"))
-        if self.settings.preview_pane_visible:
-            self.preview_toggle_button.setText(self._t("action.toggle_preview_hide"))
-        else:
-            self.preview_toggle_button.setText(self._t("action.toggle_preview_show"))
         self.settings_button.setText(self._t("action.settings"))
         self.project_label.setText(self._t("label.project"))
         self.base_label.setText(self._t("label.base"))
+        self.base_compare_hint.setText(self._t("label.base_compare_flow"))
         self.compare_label.setText(self._t("label.compare"))
         self.snapshot_button.setText(self._t("action.save_snapshot"))
         self.date_compare_button.setText(self._t("action.compare_by_date"))
@@ -436,16 +469,18 @@ class RecheckMainWindow(QMainWindow):
         self.preview_title.setText(self._t("label.preview"))
         self.preview_helper.setText(self._t("helper.preview"))
         self.preview_info.setText(self._t("preview.info.empty"))
+        self.preview_collapsed_hint.setText(self._t("preview.collapsed_hint"))
         self.base_preview.retranslate(self._t, title=self._t("preview.base_column"))
         self.compare_preview.retranslate(self._t, title=self._t("preview.compare_column"))
         self.open_base_button.setText(self._t("action.open_base"))
         self.open_compare_button.setText(self._t("action.open_compare"))
         self.open_explorer_button.setText(self._t("action.open_explorer"))
         self.history_panel.retranslate(self._t)
+        self._update_preview_collapse_control()
 
         self._update_summary_counts(self.latest_counts)
 
-    def _load_projects(self) -> None:
+    def _load_projects(self, *, preferred_project_id: str | None = None) -> None:
         projects = self.project_store.list_projects()
         self.project_selector.blockSignals(True)
         self.project_selector.clear()
@@ -456,8 +491,15 @@ class RecheckMainWindow(QMainWindow):
         if not projects:
             self._create_project_with_dialog(initial=True)
             return
-        self.project_selector.setCurrentIndex(0)
-        self._on_project_changed(0)
+
+        index = 0
+        if preferred_project_id:
+            for i in range(self.project_selector.count()):
+                if self.project_selector.itemData(i) == preferred_project_id:
+                    index = i
+                    break
+        self.project_selector.setCurrentIndex(index)
+        self._on_project_changed(index)
 
     def _create_project_with_dialog(self, *, initial: bool = False) -> None:
         title_key = "dialog.setup.initial" if initial else "dialog.setup.create"
@@ -470,8 +512,10 @@ class RecheckMainWindow(QMainWindow):
                 snapshot_dir=str(values["snapshot_dir"]),
                 exclude_rules=list(values["exclude_rules"]),
             )
-            self._load_projects()
-            self._select_project(project.project_id)
+            self._reset_project_view_state()
+            self._load_projects(preferred_project_id=project.project_id)
+            created_message = self._t("msg.project_created_no_snapshot", name=project.name)
+            QTimer.singleShot(0, lambda msg=created_message: self.statusBar().showMessage(msg, 8000))
             return
 
         if initial:
@@ -480,21 +524,17 @@ class RecheckMainWindow(QMainWindow):
     def _select_project(self, project_id: str) -> None:
         for index in range(self.project_selector.count()):
             if self.project_selector.itemData(index) == project_id:
-                self.project_selector.setCurrentIndex(index)
-                self._on_project_changed(index)
+                if self.project_selector.currentIndex() != index:
+                    self.project_selector.setCurrentIndex(index)
+                else:
+                    self._on_project_changed(index)
                 return
 
     def _on_project_changed(self, index: int) -> None:
         project_id = self.project_selector.itemData(index)
         if not project_id:
             return
-        # Prevent previous-project selections from leaking into current project state.
-        self.base_manifest = None
-        self.compare_manifest = None
-        self.base_selector.clear()
-        self.compare_selector.clear()
-        self.diff_table.setRowCount(0)
-        self.preview_info.setText(self._t("preview.info.empty"))
+        self._reset_project_view_state()
 
         project = self.project_store.load_project(str(project_id))
         self.current_project = project
@@ -502,7 +542,9 @@ class RecheckMainWindow(QMainWindow):
         self._refresh_scope_tree()
         self._refresh_snapshots()
         self._refresh_compare_logs()
-        self._clear_results()
+        if not self.snapshots:
+            self.statusBar().showMessage(self._t("msg.project_loaded_empty", name=project.name), 8000)
+            return
         self.statusBar().showMessage(self._t("msg.project_loaded", name=project.name))
 
     def _refresh_snapshots(self) -> None:
@@ -517,7 +559,7 @@ class RecheckMainWindow(QMainWindow):
 
         for snapshot in self.snapshots:
             source_name = Path(snapshot.source_folder).name or snapshot.source_folder
-            label = f"{snapshot.created_at[:19]} | {snapshot.name} | {source_name}"
+            label = f"{self._format_table_timestamp(snapshot.created_at)} | {snapshot.name} | {source_name}"
             self.base_selector.addItem(label, snapshot.snapshot_id)
             self.compare_selector.addItem(label, snapshot.snapshot_id)
 
@@ -559,6 +601,23 @@ class RecheckMainWindow(QMainWindow):
         self.compare_preview.show_file(None, empty_message=self._t("preview.none"), modified_time=None, size=None)
         self.diff_table.setRowCount(0)
         self._update_summary_counts(self.latest_counts)
+
+    def _reset_project_view_state(self) -> None:
+        self.snapshots = []
+        self.compare_logs = []
+        self.base_manifest = None
+        self.compare_manifest = None
+        self.base_selector.blockSignals(True)
+        self.compare_selector.blockSignals(True)
+        self.base_selector.clear()
+        self.compare_selector.clear()
+        self.base_selector.setCurrentIndex(-1)
+        self.compare_selector.setCurrentIndex(-1)
+        self.base_selector.blockSignals(False)
+        self.compare_selector.blockSignals(False)
+        self.history_panel.set_snapshots([])
+        self.history_panel.set_compares([])
+        self._clear_results()
 
     def _save_snapshot(self) -> None:
         if not self.current_project:
@@ -629,10 +688,16 @@ class RecheckMainWindow(QMainWindow):
     def _execute_compare(self) -> None:
         if not self.current_project:
             return
+        if len(self.snapshots) < 2:
+            QMessageBox.information(self, self._t("action.compare"), self._t("msg.compare_need_snapshots"))
+            return
         base_id = self.base_selector.currentData()
         compare_id = self.compare_selector.currentData()
         if not base_id or not compare_id:
             QMessageBox.warning(self, self._t("action.compare"), self._t("msg.compare_missing"))
+            return
+        if str(base_id) == str(compare_id):
+            QMessageBox.information(self, self._t("action.compare"), self._t("msg.compare_need_distinct"))
             return
 
         if self._is_current_root_state_unsaved():
@@ -740,6 +805,21 @@ class RecheckMainWindow(QMainWindow):
     def _status_label(self, status: str) -> str:
         return self._t(f"status.{status}")
 
+    def _format_table_timestamp(self, value: str | None) -> str:
+        if not value:
+            return "-"
+        normalized = value.strip()
+        if not normalized:
+            return "-"
+        try:
+            dt = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            if "T" in normalized:
+                fallback = normalized.replace("T", " ")
+                return fallback.split(".")[0][:19]
+            return normalized
+
     def _update_summary_counts(self, counts: dict[str, int]) -> None:
         total = sum(counts.values())
         self.filter_all_button.setText(f"{self._t('filter.all')} {total}")
@@ -780,8 +860,8 @@ class RecheckMainWindow(QMainWindow):
                 self._status_label(entry.status),
                 file_display,
                 entry.relative_path,
-                entry.base_modified_time or "-",
-                entry.compare_modified_time or "-",
+                self._format_table_timestamp(entry.base_modified_time),
+                self._format_table_timestamp(entry.compare_modified_time),
                 "-" if entry.base_size is None else str(entry.base_size),
                 "-" if entry.compare_size is None else str(entry.compare_size),
             ]
@@ -801,6 +881,10 @@ class RecheckMainWindow(QMainWindow):
                 if col == 2:
                     item.setToolTip(entry.relative_path)
                     item.setForeground(QBrush(QColor("#5f7387")))
+                if col == 3 and entry.base_modified_time:
+                    item.setToolTip(entry.base_modified_time)
+                if col == 4 and entry.compare_modified_time:
+                    item.setToolTip(entry.compare_modified_time)
                 self.diff_table.setItem(row, col, item)
             self.diff_table.setRowHeight(row, 40)
         self.diff_table.setSortingEnabled(True)
@@ -839,9 +923,9 @@ class RecheckMainWindow(QMainWindow):
             return
 
         base_path, compare_path = self._resolve_entry_preview_paths(entry)
-        display_type = detect_preview_type(compare_path or base_path)
+        display_type = detect_preview_type(entry.relative_path)
         self.preview_info.setText(
-            f"File: {entry.file_name} | Type: {self._status_label(entry.status)} ({display_type}) | Path: {entry.relative_path}"
+            f"File: {entry.file_name} | Diff: {self._status_label(entry.status)} | Type: {display_type} | Path: {entry.relative_path}"
         )
 
         self.base_preview.show_file(
@@ -849,12 +933,14 @@ class RecheckMainWindow(QMainWindow):
             empty_message=self._t("preview.none") if entry.status == "added" else self._t("preview.no_file_selected"),
             modified_time=entry.base_modified_time,
             size=entry.base_size,
+            type_hint_path=entry.relative_path,
         )
         self.compare_preview.show_file(
             compare_path,
             empty_message=self._t("preview.none") if entry.status == "removed" else self._t("preview.no_file_selected"),
             modified_time=entry.compare_modified_time,
             size=entry.compare_size,
+            type_hint_path=entry.relative_path,
         )
 
     def _open_base_file(self) -> None:
@@ -991,10 +1077,15 @@ class RecheckMainWindow(QMainWindow):
         self._apply_preview_pane_visibility(not self.settings.preview_pane_visible)
 
     def _apply_preview_pane_visibility(self, visible: bool, *, persist: bool = True, notify: bool = True) -> None:
-        if self.main_splitter is None:
+        if self.main_splitter is None or self.preview_panel is None or self.preview_content is None or self.preview_collapsed_hint is None:
             return
+        collapsed_width = 56
         sizes = self.main_splitter.sizes()
         if visible:
+            self.preview_content.show()
+            self.preview_collapsed_hint.hide()
+            self.preview_panel.setMinimumWidth(260)
+            self.preview_panel.setMaximumWidth(16777215)
             if len(self._last_splitter_sizes) == 3 and self._last_splitter_sizes[2] > 0:
                 self.main_splitter.setSizes(self._last_splitter_sizes)
             else:
@@ -1002,19 +1093,37 @@ class RecheckMainWindow(QMainWindow):
             if notify:
                 self.statusBar().showMessage(self._t("msg.preview_shown"))
         else:
-            if len(sizes) == 3 and sizes[2] > 0:
+            if len(sizes) == 3 and sizes[2] > collapsed_width:
                 self._last_splitter_sizes = sizes
+            self.preview_content.hide()
+            self.preview_collapsed_hint.show()
+            self.preview_panel.setMinimumWidth(collapsed_width)
+            self.preview_panel.setMaximumWidth(collapsed_width)
+
             left = sizes[0] if len(sizes) > 0 else 290
             center = sizes[1] if len(sizes) > 1 else 530
-            right = sizes[2] if len(sizes) > 2 else 560
-            self.main_splitter.setSizes([left + right // 2, center + right // 2, 0])
+            total = sum(sizes) if sizes else (290 + 530 + 560)
+            remaining = max(220, total - collapsed_width)
+            left_ratio = left / max(1, left + center)
+            left_new = int(remaining * left_ratio)
+            center_new = max(120, remaining - left_new)
+            left_new = max(120, left_new)
+            self.main_splitter.setSizes([left_new, center_new, collapsed_width])
             if notify:
                 self.statusBar().showMessage(self._t("msg.preview_hidden"))
 
         self.settings.preview_pane_visible = visible
         if persist:
             self.settings_store.save(self.settings)
-        self._retranslate_ui()
+        self._update_preview_collapse_control()
+
+    def _update_preview_collapse_control(self) -> None:
+        if self.settings.preview_pane_visible:
+            self.preview_collapse_button.setText("<")
+            self.preview_collapse_button.setToolTip(self._t("preview.collapse"))
+        else:
+            self.preview_collapse_button.setText(">")
+            self.preview_collapse_button.setToolTip(self._t("preview.expand"))
 
     def _set_base_from_history(self, snapshot_id: str) -> None:
         self._set_combo_value(self.base_selector, snapshot_id)
@@ -1099,8 +1208,7 @@ class RecheckMainWindow(QMainWindow):
         self.current_project.snapshot_dir = str(values["snapshot_dir"])
         self.current_project.exclude_rules = list(values["exclude_rules"])
         self.project_store.save_project(self.current_project)
-        self._load_projects()
-        self._select_project(self.current_project.project_id)
+        self._load_projects(preferred_project_id=self.current_project.project_id)
 
     def _rename_project(self) -> None:
         if not self.current_project:
@@ -1115,8 +1223,7 @@ class RecheckMainWindow(QMainWindow):
             return
         self.current_project.name = value.strip()
         self.project_store.save_project(self.current_project)
-        self._load_projects()
-        self._select_project(self.current_project.project_id)
+        self._load_projects(preferred_project_id=self.current_project.project_id)
 
     def _change_root_folder(self) -> None:
         if not self.current_project:

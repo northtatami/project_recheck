@@ -572,3 +572,12 @@ v0.1 では以下を保存する。
 - 比較実行時、未保存の現状態がある場合は `保存して比較 / 保存せず比較 / キャンセル` の確認ダイアログを表示
 - Preview ペインは 3 ペイン構成を維持したまま表示/非表示を切替可能
 - Base/Compare の直接フォルダ選択はメインヘッダーから外し、必要時は Project メニューから外部フォルダをスナップショットとして取り込む
+
+## v0.1 delta note (2026-03-11)
+- New project creation now clears Base/Compare selections, diff results, and preview state.
+- After project creation, a non-modal guidance message is shown: no snapshot has been saved yet.
+- Compare execution now guides clearly when snapshots are insufficient (at least two distinct snapshots are required).
+- Preview type classification uses original relative-path extension context, independent from cache-blob filenames.
+- Preview pane collapse/expand is controlled from the preview pane header (pane-local interaction).
+- Diff table timestamps are displayed as `YYYY-MM-DD HH:MM:SS` in main cells.
+- Base/Compare labels are clarified as previous/current snapshot roles.

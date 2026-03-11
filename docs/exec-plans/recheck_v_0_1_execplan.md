@@ -383,3 +383,12 @@ v0.1 MVP は以下を満たしたら完了とする。
 - 言語設定（日本語 / English）を導入し i18n 拡張しやすい構造へ整理
 - 比較実行時は未保存状態を検知した場合に確認ダイアログを出し、`保存して比較 / 保存せず比較 / キャンセル` を選択可能にする
 - 3 ペイン構成を維持したまま Preview ペインの表示/非表示切替を追加
+
+## v0.1 delta note (2026-03-11)
+- Hardened project-switch/new-project reset so Base/Compare/results/preview state does not leak across projects.
+- Added non-modal post-create guidance that no snapshot exists yet.
+- Compare now explicitly requires sufficient snapshot context before execution.
+- Fixed preview pipeline classification by using original path context rather than cache blob filename.
+- Moved preview collapse UX to pane-local header control.
+- Standardized visible diff-table timestamps to `YYYY-MM-DD HH:MM:SS`.
+- Clarified Base/Compare role labels as previous/current snapshot flow.

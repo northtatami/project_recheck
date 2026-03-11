@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import shutil
+import tempfile
 import wave
 from datetime import timedelta
 from pathlib import Path
@@ -213,6 +216,8 @@ class AudioPreviewWidget(QWidget):
         self.player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
         self.player.setAudioOutput(self.audio_output)
+        self._media_alias_dir = Path(tempfile.gettempdir()) / "recheck_preview_media"
+        self._media_alias_dir.mkdir(parents=True, exist_ok=True)
 
         layout = QVBoxLayout(self)
         controls = QHBoxLayout()
@@ -253,10 +258,28 @@ class AudioPreviewWidget(QWidget):
         self.waveform.set_samples([0.0] * 220)
         self.waveform.set_position_ratio(0.0)
 
-    def set_file(self, path: str) -> None:
+    def _media_source_with_hint(self, source_path: str, hint_path: str | None) -> str:
+        source = Path(source_path)
+        if source.suffix:
+            return str(source)
+        hint_suffix = Path(hint_path or "").suffix.lower()
+        if not hint_suffix:
+            return str(source)
+        try:
+            stat = source.stat()
+            digest = hashlib.sha1(f"{source}:{stat.st_size}:{stat.st_mtime_ns}:{hint_suffix}".encode("utf-8")).hexdigest()
+            alias_path = self._media_alias_dir / f"{digest}{hint_suffix}"
+            if not alias_path.exists():
+                shutil.copy2(source, alias_path)
+            return str(alias_path)
+        except Exception:
+            return str(source)
+
+    def set_file(self, path: str, *, source_hint_path: str | None = None) -> None:
         self.clear()
-        self.waveform.set_samples(build_waveform_samples(path))
-        self.player.setSource(QUrl.fromLocalFile(path))
+        media_source = self._media_source_with_hint(path, source_hint_path)
+        self.waveform.set_samples(build_waveform_samples(media_source))
+        self.player.setSource(QUrl.fromLocalFile(media_source))
 
     def _on_duration_changed(self, duration: int) -> None:
         self.slider.setRange(0, max(0, duration))
@@ -385,6 +408,7 @@ class FilePreviewColumn(QFrame):
         empty_message: str,
         modified_time: str | None,
         size: int | None,
+        type_hint_path: str | None = None,
     ) -> None:
         if not path:
             self._show_none(empty_message)
@@ -401,7 +425,7 @@ class FilePreviewColumn(QFrame):
             self._tr("preview.size_modified", size=_format_bytes(size), modified=modified_time or "-")
         )
 
-        preview_type = detect_preview_type(str(file_path))
+        preview_type = detect_preview_type(type_hint_path or str(file_path))
         if preview_type == "image":
             self.stop_media()
             pixmap = QPixmap(str(file_path))
@@ -438,7 +462,7 @@ class FilePreviewColumn(QFrame):
             return
 
         if preview_type == "audio":
-            self.audio_widget.set_file(str(file_path))
+            self.audio_widget.set_file(str(file_path), source_hint_path=type_hint_path)
             self.stack.setCurrentIndex(self._page_audio)
             return
 
