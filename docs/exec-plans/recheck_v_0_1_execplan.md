@@ -428,3 +428,8 @@ v0.1 MVP は以下を満たしたら完了とする。
 - Added lightweight separators in project menu for clearer action grouping.
 - Enforced scope-visual semantics by mode: whole mode hides tree checkboxes; selected mode shows checkboxes for filtering.
 - Added mode-coupled scope path label updates to reduce ambiguity of active compare scope.
+
+## v0.1 delta note (2026-03-11, polish-7)
+- Finalized whole-mode scope semantics by removing visible checkbox indicators entirely in whole mode.
+- Preserved selected-mode checked-state intent across mode/refresh transitions where practical.
+- Applied subtle separator margin styling in project menu to improve section readability.

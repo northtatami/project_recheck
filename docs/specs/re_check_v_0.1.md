@@ -620,3 +620,8 @@ v0.1 では以下を保存する。
   - `全体`: tree visible but checkboxes hidden (view-only)
   - `選択`: checkboxes shown and used for filtering
 - Scope path label now updates by mode (`whole` / selected folders / no-folder-selected state).
+
+## v0.1 delta note (2026-03-11, polish-7)
+- In `全体` mode, scope-folder checkbox indicators are now fully hidden (not only disabled), clarifying that checks do not apply.
+- In `選択` mode, checkbox indicators reappear with prior checked selections preserved where possible.
+- Project menu separator spacing is lightly padded for calmer visual grouping without changing action scope.

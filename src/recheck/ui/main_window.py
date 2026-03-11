@@ -81,6 +81,7 @@ class RecheckMainWindow(QMainWindow):
         self.latest_counts = {status: 0 for status in STATUSES}
         self.base_manifest: SnapshotManifest | None = None
         self.compare_manifest: SnapshotManifest | None = None
+        self._scope_checked_paths: set[str] = set()
         self.main_splitter: QSplitter | None = None
         self.preview_panel: QFrame | None = None
         self.preview_content: QWidget | None = None
@@ -668,6 +669,7 @@ class RecheckMainWindow(QMainWindow):
         self.compare_logs = []
         self.base_manifest = None
         self.compare_manifest = None
+        self._scope_checked_paths = set()
         self.last_compare_csv_path = None
         self.base_selector.blockSignals(True)
         self.compare_selector.blockSignals(True)
@@ -736,6 +738,7 @@ class RecheckMainWindow(QMainWindow):
             iterator += 1
 
         unique = sorted({normalize_relpath(item) for item in selected if item.strip()})
+        self._scope_checked_paths = set(unique)
         return unique
 
     def _update_scope_path_label(self) -> None:
@@ -748,6 +751,18 @@ class RecheckMainWindow(QMainWindow):
             self.current_path_label.setText(f"Path: {', '.join(selected)}")
             return
         self.current_path_label.setText(f"Path: {self._t('msg.scope_selected_none')}")
+
+    def _capture_scope_checks(self) -> set[str]:
+        checked: set[str] = set()
+        iterator = QTreeWidgetItemIterator(self.scope_tree)
+        while iterator.value():
+            item = iterator.value()
+            rel = item.data(0, Qt.ItemDataRole.UserRole)
+            if rel and item.data(0, Qt.ItemDataRole.CheckStateRole) is not None:
+                if item.checkState(0) == Qt.CheckState.Checked:
+                    checked.add(normalize_relpath(str(rel)))
+            iterator += 1
+        return checked
 
     def _execute_compare(self) -> None:
         if not self.current_project:
@@ -1068,14 +1083,9 @@ class RecheckMainWindow(QMainWindow):
         open_external(str(target))
 
     def _refresh_scope_tree(self) -> None:
-        checked_paths: set[str] = set()
-        iterator = QTreeWidgetItemIterator(self.scope_tree)
-        while iterator.value():
-            item = iterator.value()
-            rel = item.data(0, Qt.ItemDataRole.UserRole)
-            if rel and item.checkState(0) == Qt.CheckState.Checked:
-                checked_paths.add(str(rel))
-            iterator += 1
+        checked_paths: set[str] = set(self._scope_checked_paths)
+        checked_paths.update(self._capture_scope_checks())
+        self._scope_checked_paths = {normalize_relpath(path) for path in checked_paths}
 
         self.scope_tree.blockSignals(True)
         self.scope_tree.clear()
@@ -1088,7 +1098,7 @@ class RecheckMainWindow(QMainWindow):
         root_item.setData(0, Qt.ItemDataRole.UserRole, "")
         root_item.setData(0, Qt.ItemDataRole.UserRole + 1, root_path.name or str(root_path))
         root_item.setFlags(root_item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
-        root_item.setCheckState(0, Qt.CheckState.Unchecked)
+        root_item.setData(0, Qt.ItemDataRole.CheckStateRole, None)
         self.scope_tree.addTopLevelItem(root_item)
 
         rel_to_item: dict[str, QTreeWidgetItem] = {"": root_item}
@@ -1100,7 +1110,7 @@ class RecheckMainWindow(QMainWindow):
                     parent_rel = ""
                 parent_item = rel_to_item.get(parent_rel, root_item)
                 item = QTreeWidgetItem([directory.name])
-                item.setCheckState(0, Qt.CheckState.Checked if rel in checked_paths else Qt.CheckState.Unchecked)
+                item.setCheckState(0, Qt.CheckState.Checked if rel in self._scope_checked_paths else Qt.CheckState.Unchecked)
                 item.setData(0, Qt.ItemDataRole.UserRole, rel)
                 item.setData(0, Qt.ItemDataRole.UserRole + 1, directory.name)
                 parent_item.addChild(item)
@@ -1147,6 +1157,8 @@ class RecheckMainWindow(QMainWindow):
             iterator += 1
 
     def _on_scope_mode_changed(self) -> None:
+        if self._current_scope_mode() == "whole":
+            self._scope_checked_paths.update(self._capture_scope_checks())
         self._apply_scope_tree_mode_visuals()
         self._update_scope_path_label()
 
@@ -1156,6 +1168,7 @@ class RecheckMainWindow(QMainWindow):
         rel = changed.data(0, Qt.ItemDataRole.UserRole)
         if not rel:
             return
+        self._scope_checked_paths = self._capture_scope_checks()
         self._update_scope_path_label()
 
     def _apply_scope_tree_mode_visuals(self) -> None:
@@ -1170,6 +1183,17 @@ class RecheckMainWindow(QMainWindow):
             flags = item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable
             if selected_mode and rel:
                 flags |= Qt.ItemFlag.ItemIsUserCheckable
+                item.setData(
+                    0,
+                    Qt.ItemDataRole.CheckStateRole,
+                    Qt.CheckState.Checked if normalize_relpath(str(rel)) in self._scope_checked_paths else Qt.CheckState.Unchecked,
+                )
+            elif rel:
+                # Remove the checkbox indicator entirely in whole mode.
+                item.setData(0, Qt.ItemDataRole.CheckStateRole, None)
+            else:
+                # Keep project-root row view-only and checkbox-free in all modes.
+                item.setData(0, Qt.ItemDataRole.CheckStateRole, None)
             item.setFlags(flags)
             iterator += 1
         if not was_blocked:
@@ -1273,6 +1297,15 @@ class RecheckMainWindow(QMainWindow):
             return
 
         menu = QMenu(self)
+        menu.setStyleSheet(
+            """
+            QMenu::separator {
+                height: 1px;
+                background: #d6e0ea;
+                margin: 6px 10px 6px 10px;
+            }
+            """
+        )
         create_action = QAction(self._t("project.menu.create"), self)
         create_action.triggered.connect(lambda: self._create_project_with_dialog(initial=False))
         menu.addAction(create_action)
