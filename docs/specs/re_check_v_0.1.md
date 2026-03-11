@@ -635,3 +635,20 @@ v0.1 では以下を保存する。
 - Compare execution now builds and retains the full diff dataset for the current Base/Compare pair.
 - Scope mode switches and checkbox changes now re-filter the current dataset immediately without requiring another Compare execution.
 - Preview selection is refreshed against the filtered visible result set so stale preview content is not left behind.
+
+## v0.1 delta note (2026-03-11, polish-10)
+- Heavy operations are moved off the UI thread (project loading, snapshot save, compare execution, history loading, and scope-path scanning), reducing visible freeze behavior on large projects.
+- Busy/progress status feedback is shown during long operations (loading/saving/comparing/history/scope-tree load).
+- Scope tree rebuild is now fed from background-scanned paths and rendered in chunks to keep the UI responsive during large tree updates.
+- History panel loading is lazy and refreshed on demand to avoid unnecessary eager work.
+
+## v0.1 delta note (2026-03-11, polish-11)
+- Diff result table apply/render now uses staged chunk population so large compare outputs return UI interactivity earlier.
+- Result rendering status is shown while row chunks are applied.
+- Search-triggered table re-apply is now debounced to reduce repeated heavy rebinding on large datasets.
+
+## v0.1 delta note (2026-03-11, polish-12)
+- Snapshot save paths now show an application-modal progress dialog (save snapshot / save-and-compare / external snapshot import) to prevent misleading concurrent interaction while save is running.
+- New project creation now prompts whether to save an initial snapshot immediately; selecting save can assign the new snapshot to Base and Compare for clearer first-step onboarding.
+- Scope tree rendering now prioritizes shallow initial materialization and loads deeper branches on expansion, reducing up-front tree UI cost on large folder structures.
+- Diff filter switching now reuses cached scope/status groups from the current compare dataset to avoid unnecessary repeated full-list filtering work.

@@ -443,3 +443,20 @@ v0.1 MVP は以下を満たしたら完了とする。
 - Compare execution now builds and retains the full diff dataset for the current Base/Compare pair.
 - Scope mode switches and checkbox changes now re-filter the current in-memory dataset immediately without requiring another Compare execution.
 - Preview selection is refreshed against the filtered visible rows so stale preview content is cleared or replaced when the current row falls out of scope.
+
+## v0.1 delta note (2026-03-11, polish-10)
+- Shifted heavy IO/compute operations to background tasks to improve responsiveness for large projects (project load, snapshot save, compare run, history load, scope scan).
+- Added explicit busy/progress feedback during long-running operations.
+- Switched scope-tree refresh to background scan + chunked UI rendering to reduce blocking during large folder trees.
+- History panel now loads lazily/on-demand, reducing eager startup/project-switch work.
+
+## v0.1 delta note (2026-03-11, polish-11)
+- Optimized large-result table rendering by chunked/staged row application instead of one heavy bind pass.
+- Added explicit result-render progress messaging during staged table population.
+- Added debounced search-triggered re-filter/rebind to avoid excessive repeated table rebuilds on large datasets.
+
+## v0.1 delta note (2026-03-11, polish-12)
+- Added modal progress UX for snapshot-save operations so save-in-progress states are explicit and interaction is safely blocked during save.
+- Added post-create onboarding prompt for initial snapshot save to reduce first-project confusion.
+- Reduced scope-tree up-front rendering cost by switching to shallow-first materialization with deferred child-node loading on expand.
+- Reduced filter-switch overhead by caching scope/status result groups per compare dataset and reusing them during UI filtering.

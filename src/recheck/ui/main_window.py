@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import copy
 import csv
-from dataclasses import asdict
+import logging
+import traceback
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from time import perf_counter
+from typing import Callable
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QBrush, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -25,6 +29,8 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QProgressDialog,
+    QProgressBar,
     QRadioButton,
     QSizePolicy,
     QSplitter,
@@ -56,6 +62,97 @@ from recheck.utils.path_utils import normalize_relpath, safe_slug
 
 STATUSES = ("added", "removed", "modified", "unchanged")
 JST = timezone(timedelta(hours=9))
+LOGGER = logging.getLogger(__name__)
+
+
+def format_display_timestamp(value: str | None) -> str:
+    if not value:
+        return "-"
+    normalized = value.strip()
+    if not normalized:
+        return "-"
+    try:
+        dt = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(JST)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        if "T" in normalized:
+            fallback = normalized.replace("T", " ")
+            return fallback.split(".")[0][:19]
+        return normalized
+
+
+def write_compare_csv_file(
+    *,
+    project_storage_dir: Path,
+    project_name: str,
+    base_snapshot_id: str,
+    compare_snapshot_id: str,
+    entries: list[DiffEntry],
+) -> str:
+    export_dir = project_storage_dir / "compare_exports"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    project_slug = safe_slug(project_name)
+    base_slug = safe_slug(base_snapshot_id)[:24]
+    compare_slug = safe_slug(compare_snapshot_id)[:24]
+    file_name = f"{project_slug}_{stamp}_base-{base_slug}_compare-{compare_slug}.csv"
+    csv_path = export_dir / file_name
+
+    with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "kind",
+                "filename",
+                "relative_path",
+                "base_modified",
+                "compare_modified",
+                "base_size",
+                "compare_size",
+            ]
+        )
+        for entry in entries:
+            writer.writerow(
+                [
+                    entry.status,
+                    entry.file_name,
+                    entry.relative_path,
+                    format_display_timestamp(entry.base_modified_time),
+                    format_display_timestamp(entry.compare_modified_time),
+                    "" if entry.base_size is None else entry.base_size,
+                    "" if entry.compare_size is None else entry.compare_size,
+                ]
+            )
+    return str(csv_path)
+
+
+class _TaskSignals(QObject):
+    finished = Signal(str, object)
+    failed = Signal(str, str)
+
+
+class _TaskRunner(QRunnable):
+    def __init__(self, task_id: str, fn) -> None:
+        super().__init__()
+        self.task_id = task_id
+        self.fn = fn
+        self.signals = _TaskSignals()
+
+    def run(self) -> None:
+        try:
+            result = self.fn()
+        except Exception:
+            try:
+                self.signals.failed.emit(self.task_id, traceback.format_exc())
+            except RuntimeError:
+                pass
+            return
+        try:
+            self.signals.finished.emit(self.task_id, result)
+        except RuntimeError:
+            pass
 
 
 class RecheckMainWindow(QMainWindow):
@@ -70,6 +167,7 @@ class RecheckMainWindow(QMainWindow):
         self.preview_cache_store = PreviewCacheStore(self.project_store.app_data_dir)
         self.snapshot_store = SnapshotStore(self.preview_cache_store)
         self.compare_log_store = CompareLogStore()
+        self.thread_pool = QThreadPool.globalInstance()
 
         self.current_project: ProjectConfig | None = None
         self.snapshots: list[SnapshotRecord] = []
@@ -89,6 +187,41 @@ class RecheckMainWindow(QMainWindow):
         self._last_splitter_sizes = self._default_splitter_sizes()
         self.last_compare_csv_path: str | None = None
         self._shortcuts: list[QShortcut] = []
+        self._task_callbacks: dict[str, tuple[callable, callable | None]] = {}
+        self._task_messages: dict[str, str] = {}
+        self._task_progress_dialogs: dict[str, QProgressDialog] = {}
+        self._task_counter = 0
+        self._busy_task_id: str | None = None
+        self._history_dirty = True
+        self._scope_build_token = 0
+        self._scope_build_queue: deque[str] = deque()
+        self._scope_build_rel_to_item: dict[str, QTreeWidgetItem] = {}
+        self._scope_build_total = 0
+        self._scope_build_done = 0
+        self._scope_build_root_name = ""
+        self._scope_build_active = False
+        self._scope_children_map: dict[str, list[str]] = {}
+        self._scope_materialized_paths: set[str] = set()
+        self._scope_expand_token = 0
+        self._table_render_token = 0
+        self._table_render_active = False
+        self._table_render_entries: list[DiffEntry] = []
+        self._table_render_row = 0
+        self._table_render_selected_row: int | None = None
+        self._table_render_target_key: tuple[str, str, str] | None = None
+        self._suppress_selection_events = False
+        self._search_apply_timer = QTimer(self)
+        self._search_apply_timer.setSingleShot(True)
+        self._search_apply_timer.setInterval(180)
+        self._search_apply_timer.timeout.connect(self._apply_filters_to_table)
+        self._last_apply_duration_ms = 0.0
+        self._diff_dataset_version = 0
+        self._scope_filter_cache_key: tuple[int, str, tuple[str, ...]] | None = None
+        self._scope_filter_cache_entries: list[DiffEntry] = []
+        self._scope_filter_status_groups: dict[str, list[DiffEntry]] = {status: [] for status in STATUSES}
+        self._scope_filter_counts: dict[str, int] = {status: 0 for status in STATUSES}
+        self._entry_search_texts: dict[tuple[str, str, str], str] = {}
+        self._pending_initial_snapshot_project_id: str | None = None
 
         self.setWindowTitle("Re:Check - Diff Review for folders")
         self.resize(1580, 920)
@@ -139,6 +272,11 @@ class RecheckMainWindow(QMainWindow):
         shortcut.activated.connect(self._show_command_palette_stub)
         self._shortcuts.append(shortcut)
         self._setup_shortcuts()
+        self.busy_progress = QProgressBar(self)
+        self.busy_progress.setRange(0, 0)
+        self.busy_progress.setFixedWidth(180)
+        self.busy_progress.setVisible(False)
+        self.statusBar().addPermanentWidget(self.busy_progress)
         self.statusBar().showMessage(self._t("msg.ready"))
         self._apply_preview_pane_visibility(self.settings.preview_pane_visible, persist=False, notify=False)
 
@@ -281,7 +419,9 @@ class RecheckMainWindow(QMainWindow):
         layout.addLayout(mode_row)
 
         self.scope_tree = QTreeWidget()
+        self.scope_tree.setUniformRowHeights(True)
         self.scope_tree.itemChanged.connect(self._on_scope_item_changed)
+        self.scope_tree.itemExpanded.connect(self._on_scope_item_expanded)
         layout.addWidget(self.scope_tree, 1)
         return panel
 
@@ -324,7 +464,7 @@ class RecheckMainWindow(QMainWindow):
         layout.addLayout(cards)
 
         self.search_box = QLineEdit()
-        self.search_box.textChanged.connect(self._apply_filters_to_table)
+        self.search_box.textChanged.connect(self._on_search_text_changed)
         layout.addWidget(self.search_box)
 
         self.diff_table = QTableWidget(0, 7)
@@ -332,6 +472,7 @@ class RecheckMainWindow(QMainWindow):
         self.diff_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.diff_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.diff_table.verticalHeader().setVisible(False)
+        self.diff_table.verticalHeader().setDefaultSectionSize(self._diff_row_height())
         self.diff_table.setWordWrap(False)
         self.diff_table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
         self.diff_table.horizontalHeader().setFixedHeight(44)
@@ -519,6 +660,7 @@ class RecheckMainWindow(QMainWindow):
             ]
         )
         self._configure_diff_table_columns()
+        self.diff_table.verticalHeader().setDefaultSectionSize(self._diff_row_height())
 
         self.preview_title.setText(self._t("label.preview"))
         self.preview_helper.setText(self._t("helper.preview"))
@@ -533,6 +675,100 @@ class RecheckMainWindow(QMainWindow):
         self._update_preview_collapse_control()
 
         self._update_summary_counts(self.latest_counts)
+
+    def _is_busy(self) -> bool:
+        return self._busy_task_id is not None or self._scope_build_active
+
+    def _set_primary_controls_enabled(self, enabled: bool) -> None:
+        for widget in (
+            self.compare_button,
+            self.snapshot_button,
+            self.history_button,
+            self.project_selector,
+            self.project_menu_button,
+            self.base_selector,
+            self.compare_selector,
+            self.date_compare_button,
+        ):
+            widget.setEnabled(enabled)
+
+    def _set_busy(self, active: bool, message: str = "") -> None:
+        self.busy_progress.setVisible(active)
+        self._set_primary_controls_enabled(not active)
+        if active and message:
+            self.statusBar().showMessage(message)
+
+    def _start_background_task(
+        self,
+        *,
+        task_name: str,
+        status_message: str,
+        fn,
+        on_success: Callable[[object], None],
+        on_failure: Callable[[str], None] | None = None,
+        allow_when_busy: bool = False,
+        modal_title: str | None = None,
+        modal_label: str | None = None,
+    ) -> bool:
+        if self._is_busy() and not allow_when_busy:
+            self.statusBar().showMessage(self._t("msg.busy_wait"), 3000)
+            return False
+
+        self._task_counter += 1
+        task_id = f"{task_name}_{self._task_counter}"
+        self._task_callbacks[task_id] = (on_success, on_failure)
+        self._task_messages[task_id] = status_message
+        self._busy_task_id = task_id
+        self._set_busy(True, status_message)
+        if modal_title:
+            progress = QProgressDialog(modal_label or status_message, "", 0, 0, self)
+            progress.setWindowTitle(modal_title)
+            progress.setCancelButton(None)
+            progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+            progress.setMinimumDuration(0)
+            progress.setAutoClose(False)
+            progress.setAutoReset(False)
+            progress.setValue(0)
+            progress.show()
+            self._task_progress_dialogs[task_id] = progress
+
+        runner = _TaskRunner(task_id, fn)
+        runner.signals.finished.connect(self._on_background_task_finished)
+        runner.signals.failed.connect(self._on_background_task_failed)
+        self.thread_pool.start(runner)
+        return True
+
+    def _close_task_progress_dialog(self, task_id: str) -> None:
+        dialog = self._task_progress_dialogs.pop(task_id, None)
+        if dialog is None:
+            return
+        dialog.close()
+        dialog.deleteLater()
+
+    def _on_background_task_finished(self, task_id: str, payload: object) -> None:
+        callbacks = self._task_callbacks.pop(task_id, None)
+        self._task_messages.pop(task_id, None)
+        self._close_task_progress_dialog(task_id)
+        if self._busy_task_id == task_id:
+            self._busy_task_id = None
+            self._set_busy(False)
+        if not callbacks:
+            return
+        on_success, _on_failure = callbacks
+        on_success(payload)
+
+    def _on_background_task_failed(self, task_id: str, error_text: str) -> None:
+        callbacks = self._task_callbacks.pop(task_id, None)
+        status_message = self._task_messages.pop(task_id, self._t("msg.processing_error"))
+        self._close_task_progress_dialog(task_id)
+        if self._busy_task_id == task_id:
+            self._busy_task_id = None
+            self._set_busy(False)
+
+        if callbacks and callbacks[1]:
+            callbacks[1](error_text)
+        else:
+            QMessageBox.warning(self, self._t("dialog.validation"), f"{status_message}\n\n{error_text.splitlines()[-1]}")
 
     def _load_projects(self, *, preferred_project_id: str | None = None) -> None:
         projects = self.project_store.list_projects()
@@ -555,6 +791,32 @@ class RecheckMainWindow(QMainWindow):
         self.project_selector.setCurrentIndex(index)
         self._on_project_changed(index)
 
+    @staticmethod
+    def _scan_scope_paths(root_folder: str) -> list[str]:
+        root_path = Path(root_folder)
+        if not root_path.exists():
+            return []
+        paths: list[str] = []
+        for directory in root_path.rglob("*"):
+            if not directory.is_dir():
+                continue
+            paths.append(normalize_relpath(str(directory.relative_to(root_path))))
+        paths.sort()
+        return paths
+
+    def _task_load_project_bundle(self, project_id: str) -> dict[str, object]:
+        project = self.project_store.load_project(project_id)
+        snapshots = self.snapshot_store.list_snapshots(project)
+        scope_paths = self._scan_scope_paths(project.root_folder)
+        return {"project": project, "snapshots": snapshots, "scope_paths": scope_paths}
+
+    def _task_load_history_bundle(self, project_id: str) -> dict[str, object]:
+        project = self.project_store.load_project(project_id)
+        snapshots = self.snapshot_store.list_snapshots(project)
+        storage_dir = self.project_store.project_storage_dir(project.project_id)
+        compare_logs = self.compare_log_store.list_compare_logs(storage_dir)
+        return {"project_id": project.project_id, "snapshots": snapshots, "compare_logs": compare_logs}
+
     def _create_project_with_dialog(self, *, initial: bool = False) -> None:
         title_key = "dialog.setup.initial" if initial else "dialog.setup.create"
         dialog = SetupDialog(self, title=self._t(title_key), tr=self._t)
@@ -568,18 +830,70 @@ class RecheckMainWindow(QMainWindow):
             )
             self._reset_project_view_state()
             self._load_projects(preferred_project_id=project.project_id)
-            if not self.current_project or self.current_project.project_id != project.project_id:
+            if (not self.current_project or self.current_project.project_id != project.project_id) and not self._is_busy():
                 self._select_project(project.project_id)
             if self.base_selector.count() == 0:
                 self.base_selector.setCurrentIndex(-1)
             if self.compare_selector.count() == 0:
                 self.compare_selector.setCurrentIndex(-1)
+            self._pending_initial_snapshot_project_id = project.project_id
             created_message = self._t("msg.project_created_no_snapshot", name=project.name)
             QTimer.singleShot(0, lambda msg=created_message: self.statusBar().showMessage(msg, 8000))
+            QTimer.singleShot(200, self._maybe_prompt_initial_snapshot_save)
             return
 
         if initial:
-            QMessageBox.information(self, self._t("dialog.setup.initial"), self._t("msg.setup_required"))
+            retry = QMessageBox.question(
+                self,
+                self._t("dialog.setup.initial"),
+                self._t("msg.setup_required"),
+                QMessageBox.StandardButton.Retry | QMessageBox.StandardButton.Close,
+                QMessageBox.StandardButton.Retry,
+            )
+            if retry == QMessageBox.StandardButton.Retry:
+                QTimer.singleShot(0, lambda: self._create_project_with_dialog(initial=True))
+            else:
+                self.close()
+
+    def _maybe_prompt_initial_snapshot_save(self) -> None:
+        project_id = self._pending_initial_snapshot_project_id
+        if not project_id:
+            return
+        if self._is_busy():
+            QTimer.singleShot(200, self._maybe_prompt_initial_snapshot_save)
+            return
+        if not self.current_project or self.current_project.project_id != project_id:
+            if self.project_selector.currentData() != project_id:
+                self._pending_initial_snapshot_project_id = None
+                return
+            QTimer.singleShot(200, self._maybe_prompt_initial_snapshot_save)
+            return
+        if self.snapshots:
+            self._pending_initial_snapshot_project_id = None
+            return
+
+        message = QMessageBox(self)
+        message.setIcon(QMessageBox.Icon.Question)
+        message.setWindowTitle(self._t("dialog.initial_snapshot.title"))
+        message.setText(self._t("dialog.initial_snapshot.text"))
+        save_button = message.addButton(self._t("dialog.initial_snapshot.save"), QMessageBox.ButtonRole.AcceptRole)
+        later_button = message.addButton(self._t("dialog.initial_snapshot.later"), QMessageBox.ButtonRole.RejectRole)
+        message.setDefaultButton(save_button)
+        message.exec()
+
+        clicked = message.clickedButton()
+        self._pending_initial_snapshot_project_id = None
+        if clicked == save_button:
+            self._start_snapshot_save(
+                name=self.current_project.name,
+                source_folder=None,
+                set_compare=True,
+                set_base=True,
+            )
+            return
+        self.base_selector.setCurrentIndex(-1)
+        self.compare_selector.setCurrentIndex(-1)
+        self.statusBar().showMessage(self._t("msg.project_created_no_snapshot", name=self.current_project.name), 8000)
 
     def _select_project(self, project_id: str) -> None:
         for index in range(self.project_selector.count()):
@@ -595,23 +909,47 @@ class RecheckMainWindow(QMainWindow):
         if not project_id:
             return
         self._reset_project_view_state()
+        self.base_selector.setEnabled(False)
+        self.compare_selector.setEnabled(False)
 
-        project = self.project_store.load_project(str(project_id))
-        self.current_project = project
+        requested_project_id = str(project_id)
 
-        self._refresh_scope_tree()
-        self._refresh_snapshots()
-        self._refresh_compare_logs()
-        if not self.snapshots:
-            self.statusBar().showMessage(self._t("msg.project_loaded_empty", name=project.name), 8000)
-            return
-        self.statusBar().showMessage(self._t("msg.project_loaded", name=project.name))
+        def _on_loaded(payload: object) -> None:
+            bundle = payload if isinstance(payload, dict) else {}
+            project = bundle.get("project")
+            if not isinstance(project, ProjectConfig):
+                return
+            if self.project_selector.currentData() != project.project_id:
+                return
+            self.current_project = project
 
-    def _refresh_snapshots(self) -> None:
-        if not self.current_project:
-            return
-        self.snapshots = self.snapshot_store.list_snapshots(self.current_project)
+            scope_paths = bundle.get("scope_paths", [])
+            if isinstance(scope_paths, list):
+                self._apply_scope_tree_paths([str(item) for item in scope_paths])
 
+            snapshots = bundle.get("snapshots", [])
+            if isinstance(snapshots, list):
+                self._apply_snapshot_records([item for item in snapshots if isinstance(item, SnapshotRecord)])
+            self.compare_logs = []
+            self.history_panel.set_compares([])
+            self._history_dirty = True
+
+            if not self.snapshots:
+                self.statusBar().showMessage(self._t("msg.project_loaded_empty", name=project.name), 8000)
+                self._maybe_prompt_initial_snapshot_save()
+                return
+            self.statusBar().showMessage(self._t("msg.project_loaded", name=project.name))
+            self._maybe_prompt_initial_snapshot_save()
+
+        self._start_background_task(
+            task_name="project_load",
+            status_message=self._t("msg.loading_project"),
+            fn=lambda pid=requested_project_id: self._task_load_project_bundle(pid),
+            on_success=_on_loaded,
+        )
+
+    def _apply_snapshot_records(self, snapshots: list[SnapshotRecord]) -> None:
+        self.snapshots = snapshots
         self.base_selector.blockSignals(True)
         self.compare_selector.blockSignals(True)
         self.base_selector.clear()
@@ -626,14 +964,17 @@ class RecheckMainWindow(QMainWindow):
         self.base_selector.blockSignals(False)
         self.compare_selector.blockSignals(False)
 
-        if self.current_project.last_base_snapshot_id:
+        if self.current_project and self.current_project.last_base_snapshot_id:
             self._set_combo_value(self.base_selector, self.current_project.last_base_snapshot_id)
-        if self.current_project.last_compare_snapshot_id:
+        if self.current_project and self.current_project.last_compare_snapshot_id:
             self._set_combo_value(self.compare_selector, self.current_project.last_compare_snapshot_id)
         if self.base_selector.count() == 0:
             self.base_selector.setCurrentIndex(-1)
         if self.compare_selector.count() == 0:
             self.compare_selector.setCurrentIndex(-1)
+        if not self._is_busy():
+            self.base_selector.setEnabled(True)
+            self.compare_selector.setEnabled(True)
         self.history_panel.set_snapshots(self.snapshots)
 
     def _refresh_compare_logs(self) -> None:
@@ -650,10 +991,13 @@ class RecheckMainWindow(QMainWindow):
                 return
 
     def _clear_results(self) -> None:
+        self._table_render_token += 1
+        self._table_render_active = False
         self.diff_entries = []
         self.visible_entries = []
         self.current_entry = None
         self.latest_counts = {status: 0 for status in STATUSES}
+        self._invalidate_diff_dataset_cache()
         self.base_manifest = None
         self.compare_manifest = None
         self.current_path_label.setText(self._t("label.path_whole"))
@@ -670,6 +1014,10 @@ class RecheckMainWindow(QMainWindow):
         self.base_manifest = None
         self.compare_manifest = None
         self._scope_checked_paths = set()
+        self._scope_children_map = {}
+        self._scope_materialized_paths = set()
+        self._scope_expand_token += 1
+        self._history_dirty = True
         self.last_compare_csv_path = None
         self.base_selector.blockSignals(True)
         self.compare_selector.blockSignals(True)
@@ -679,6 +1027,7 @@ class RecheckMainWindow(QMainWindow):
         self.compare_selector.setCurrentIndex(-1)
         self.base_selector.blockSignals(False)
         self.compare_selector.blockSignals(False)
+        self.scope_tree.clear()
         self.history_panel.set_snapshots([])
         self.history_panel.set_compares([])
         self._clear_results()
@@ -690,11 +1039,7 @@ class RecheckMainWindow(QMainWindow):
         name, ok = QInputDialog.getText(self, self._t("dialog.snapshot.title"), self._t("dialog.snapshot.label"), text=default_name)
         if not ok:
             return
-        snapshot = self.snapshot_store.save_snapshot(self.current_project, settings=self.settings, name=name)
-        self._refresh_scope_tree()
-        self._refresh_snapshots()
-        self._set_combo_value(self.compare_selector, snapshot.snapshot_id)
-        self.statusBar().showMessage(self._t("msg.snapshot_saved", name=snapshot.name))
+        self._start_snapshot_save(name=name, source_folder=None, set_compare=True)
 
     def _import_external_folder_as_snapshot(self) -> None:
         if not self.current_project:
@@ -708,15 +1053,78 @@ class RecheckMainWindow(QMainWindow):
             return
         folder_name = Path(picked).name or "external"
         snapshot_name = f"external_{folder_name}"
+        self._start_snapshot_save(name=snapshot_name, source_folder=picked, set_compare=True)
+
+    def _task_save_snapshot(self, project_id: str, name: str, source_folder: str | None) -> dict[str, object]:
+        project = self.project_store.load_project(project_id)
+        settings_copy = copy.deepcopy(self.settings)
         snapshot = self.snapshot_store.save_snapshot(
-            self.current_project,
-            settings=self.settings,
-            name=snapshot_name,
-            source_folder=picked,
+            project,
+            settings=settings_copy,
+            name=name,
+            source_folder=source_folder,
         )
-        self._refresh_snapshots()
-        self._set_combo_value(self.compare_selector, snapshot.snapshot_id)
-        self.statusBar().showMessage(self._t("msg.external_snapshot_created", name=snapshot.name))
+        snapshots = self.snapshot_store.list_snapshots(project)
+        root_path = Path(project.root_folder).resolve()
+        source_path = Path(source_folder or project.root_folder).resolve()
+        scope_paths: list[str] | None = None
+        if source_path == root_path:
+            scope_paths = self._scan_scope_paths(project.root_folder)
+        return {
+            "project_id": project_id,
+            "snapshot": snapshot,
+            "snapshots": snapshots,
+            "scope_paths": scope_paths,
+            "is_external_source": source_path != root_path,
+        }
+
+    def _start_snapshot_save(
+        self,
+        *,
+        name: str,
+        source_folder: str | None,
+        set_compare: bool,
+        set_base: bool = False,
+    ) -> None:
+        if not self.current_project:
+            return
+        project_id = self.current_project.project_id
+        message_key = "msg.saving_snapshot"
+        self._start_background_task(
+            task_name="snapshot_save",
+            status_message=self._t(message_key),
+            fn=lambda pid=project_id, snap_name=name, src=source_folder: self._task_save_snapshot(pid, snap_name, src),
+            on_success=lambda payload, assign=set_compare, assign_base=set_base: self._on_snapshot_save_finished(payload, assign, assign_base),
+            modal_title=self._t("dialog.snapshot_progress.title"),
+            modal_label=self._t("dialog.snapshot_progress.text"),
+        )
+
+    def _on_snapshot_save_finished(self, payload: object, set_compare: bool, set_base: bool) -> None:
+        bundle = payload if isinstance(payload, dict) else {}
+        if not self.current_project:
+            return
+        if bundle.get("project_id") != self.current_project.project_id:
+            return
+        snapshot = bundle.get("snapshot")
+        if not isinstance(snapshot, SnapshotRecord):
+            return
+        snapshots = bundle.get("snapshots", [])
+        if isinstance(snapshots, list):
+            self._apply_snapshot_records([item for item in snapshots if isinstance(item, SnapshotRecord)])
+        if set_base:
+            self._set_combo_value(self.base_selector, snapshot.snapshot_id)
+        if set_compare:
+            self._set_combo_value(self.compare_selector, snapshot.snapshot_id)
+
+        scope_paths = bundle.get("scope_paths")
+        if isinstance(scope_paths, list):
+            self._apply_scope_tree_paths([str(item) for item in scope_paths])
+
+        self._history_dirty = True
+        if bool(bundle.get("is_external_source")):
+            self.statusBar().showMessage(self._t("msg.external_snapshot_created", name=snapshot.name))
+            return
+        self.statusBar().showMessage(self._t("msg.snapshot_saved", name=snapshot.name))
 
     def _current_scope_mode(self) -> str:
         if self.mode_selected.isChecked():
@@ -727,17 +1135,9 @@ class RecheckMainWindow(QMainWindow):
         mode = self._current_scope_mode()
         if mode == "whole":
             return []
-
-        selected: list[str] = []
-        iterator = QTreeWidgetItemIterator(self.scope_tree)
-        while iterator.value():
-            item = iterator.value()
-            rel_path = item.data(0, Qt.ItemDataRole.UserRole)
-            if item.data(0, Qt.ItemDataRole.CheckStateRole) is not None and item.checkState(0) == Qt.CheckState.Checked:
-                selected.append("" if rel_path is None else str(rel_path))
-            iterator += 1
-
-        normalized = {normalize_relpath(item) for item in selected}
+        selected = self._capture_scope_checks()
+        preserved_unmaterialized = {path for path in self._scope_checked_paths if path not in self._scope_materialized_paths}
+        normalized = {normalize_relpath(item) for item in selected.union(preserved_unmaterialized)}
         if "" in normalized:
             unique = [""]
         else:
@@ -786,48 +1186,90 @@ class RecheckMainWindow(QMainWindow):
             QMessageBox.information(self, self._t("action.compare"), self._t("msg.compare_need_distinct"))
             return
 
-        if self._is_current_root_state_unsaved():
+        project_id = self.current_project.project_id
+        selected_base_id = str(base_id)
+        selected_compare_id = str(compare_id)
+        scope_mode = self._current_scope_mode()
+        scope_folders = self._selected_scope_folders()
+
+        self._start_background_task(
+            task_name="compare_preflight",
+            status_message=self._t("msg.preparing_compare"),
+            fn=lambda pid=project_id: self._task_is_current_root_unsaved(pid),
+            on_success=lambda payload, pid=project_id, b=selected_base_id, c=selected_compare_id, mode=scope_mode, folders=scope_folders: self._on_compare_preflight_finished(
+                pid,
+                b,
+                c,
+                mode,
+                folders,
+                bool(payload),
+            ),
+        )
+
+    def _on_compare_preflight_finished(
+        self,
+        project_id: str,
+        base_id: str,
+        compare_id: str,
+        scope_mode: str,
+        scope_folders: list[str],
+        unsaved: bool,
+    ) -> None:
+        if not self.current_project or self.current_project.project_id != project_id:
+            return
+        if unsaved:
             decision = self._ask_compare_with_unsaved_state()
             if decision == "cancel":
                 return
             if decision == "save":
-                selected_base_id = str(base_id)
-                snapshot = self.snapshot_store.save_snapshot(
-                    self.current_project,
-                    settings=self.settings,
-                    name=f"compare_{self.current_project.name}",
-                    source_folder=self.current_project.root_folder,
-                )
-                self._refresh_scope_tree()
-                self._refresh_snapshots()
-                self._set_combo_value(self.base_selector, selected_base_id)
-                self._set_combo_value(self.compare_selector, snapshot.snapshot_id)
-                compare_id = snapshot.snapshot_id
+                self._start_save_and_compare_task(project_id, base_id, scope_mode, scope_folders)
+                return
+        self._start_compare_task(project_id, base_id, compare_id, scope_mode, scope_folders)
 
-        self._run_compare(str(base_id), str(compare_id))
+    def _task_is_current_root_unsaved(self, project_id: str) -> bool:
+        project = self.project_store.load_project(project_id)
+        root = Path(project.root_folder).resolve()
+        try:
+            current_scan = scan_folder(str(root), project.exclude_rules)
+        except Exception:
+            return False
+        current_map = {item.relative_path: (item.size, item.modified_time) for item in current_scan}
+        snapshots = self.snapshot_store.list_snapshots(project)
 
-    def _run_compare(self, base_id: str, compare_id: str) -> None:
-        if not self.current_project:
-            return
+        latest_root_snapshot: SnapshotRecord | None = None
+        for snapshot in snapshots:
+            if Path(snapshot.source_folder).resolve() == root:
+                latest_root_snapshot = snapshot
+                break
 
-        self.base_manifest = self.snapshot_store.load_manifest(self.current_project, base_id)
-        self.compare_manifest = self.snapshot_store.load_manifest(self.current_project, compare_id)
-        scope_mode = self._current_scope_mode()
-        scope_folders = self._selected_scope_folders()
+        if latest_root_snapshot is None:
+            return len(current_map) > 0
 
+        manifest = self.snapshot_store.load_manifest(project, latest_root_snapshot.snapshot_id)
+        snapshot_map = {item.relative_path: (item.size, item.modified_time) for item in manifest.files}
+        return current_map != snapshot_map
+
+    def _task_compare(
+        self,
+        project_id: str,
+        base_id: str,
+        compare_id: str,
+        scope_mode: str,
+        scope_folders: list[str],
+    ) -> dict[str, object]:
+        project = self.project_store.load_project(project_id)
+        base_manifest = self.snapshot_store.load_manifest(project, base_id)
+        compare_manifest = self.snapshot_store.load_manifest(project, compare_id)
         result = compare_snapshots(
-            self.base_manifest,
-            self.compare_manifest,
+            base_manifest,
+            compare_manifest,
             scope_mode="whole",
             scope_folders=[],
         )
-        self.diff_entries = result.entries
-        self._apply_filters_to_table()
-        self._update_scope_badges(result.entries)
 
-        storage_dir = self.project_store.project_storage_dir(self.current_project.project_id)
+        storage_dir = self.project_store.project_storage_dir(project.project_id)
         self.compare_log_store.save_compare_log(
-            project=self.current_project,
+            project=project,
             project_storage_dir=storage_dir,
             base_snapshot_id=base_id,
             compare_snapshot_id=compare_id,
@@ -835,24 +1277,144 @@ class RecheckMainWindow(QMainWindow):
             scope_folders=scope_folders,
             result=result,
         )
-        self._refresh_compare_logs()
-        csv_path = self._save_compare_csv(
+        csv_path = write_compare_csv_file(
             project_storage_dir=storage_dir,
+            project_name=project.name,
             base_snapshot_id=base_id,
             compare_snapshot_id=compare_id,
             entries=result.entries,
         )
-        self.last_compare_csv_path = csv_path
+        project.last_base_snapshot_id = base_id
+        project.last_compare_snapshot_id = compare_id
+        self.project_store.save_project(project)
+        return {
+            "project_id": project_id,
+            "base_id": base_id,
+            "compare_id": compare_id,
+            "base_manifest": base_manifest,
+            "compare_manifest": compare_manifest,
+            "entries": result.entries,
+            "csv_path": csv_path,
+        }
 
-        self.current_project.last_base_snapshot_id = base_id
-        self.current_project.last_compare_snapshot_id = compare_id
-        self.project_store.save_project(self.current_project)
-
-        self._update_scope_path_label()
-        self.statusBar().showMessage(
-            self._t("msg.compare_done_csv_path", name=Path(csv_path).name, path=csv_path),
-            12000,
+    def _task_save_and_compare(
+        self,
+        project_id: str,
+        base_id: str,
+        scope_mode: str,
+        scope_folders: list[str],
+    ) -> dict[str, object]:
+        project = self.project_store.load_project(project_id)
+        settings_copy = copy.deepcopy(self.settings)
+        snapshot = self.snapshot_store.save_snapshot(
+            project,
+            settings=settings_copy,
+            name=f"compare_{project.name}",
+            source_folder=project.root_folder,
         )
+        payload = self._task_compare(project_id, base_id, snapshot.snapshot_id, scope_mode, scope_folders)
+        payload["saved_snapshot_id"] = snapshot.snapshot_id
+        payload["snapshots"] = self.snapshot_store.list_snapshots(project)
+        payload["scope_paths"] = self._scan_scope_paths(project.root_folder)
+        return payload
+
+    def _start_compare_task(
+        self,
+        project_id: str,
+        base_id: str,
+        compare_id: str,
+        scope_mode: str,
+        scope_folders: list[str],
+    ) -> None:
+        self._start_background_task(
+            task_name="compare_run",
+            status_message=self._t("msg.comparing"),
+            fn=lambda pid=project_id, b=base_id, c=compare_id, mode=scope_mode, folders=list(scope_folders): self._task_compare(
+                pid,
+                b,
+                c,
+                mode,
+                folders,
+            ),
+            on_success=self._on_compare_task_finished,
+        )
+
+    def _start_save_and_compare_task(
+        self,
+        project_id: str,
+        base_id: str,
+        scope_mode: str,
+        scope_folders: list[str],
+    ) -> None:
+        self._start_background_task(
+            task_name="save_and_compare",
+            status_message=self._t("msg.saving_and_comparing"),
+            fn=lambda pid=project_id, b=base_id, mode=scope_mode, folders=list(scope_folders): self._task_save_and_compare(
+                pid,
+                b,
+                mode,
+                folders,
+            ),
+            on_success=self._on_compare_task_finished,
+            modal_title=self._t("dialog.snapshot_progress.title"),
+            modal_label=self._t("dialog.snapshot_progress.save_compare"),
+        )
+
+    def _on_compare_task_finished(self, payload: object) -> None:
+        bundle = payload if isinstance(payload, dict) else {}
+        if not self.current_project:
+            return
+        if bundle.get("project_id") != self.current_project.project_id:
+            return
+
+        base_manifest = bundle.get("base_manifest")
+        compare_manifest = bundle.get("compare_manifest")
+        entries = bundle.get("entries", [])
+        csv_path = bundle.get("csv_path")
+        if not isinstance(base_manifest, SnapshotManifest) or not isinstance(compare_manifest, SnapshotManifest):
+            return
+        if not isinstance(entries, list):
+            return
+
+        self.base_manifest = base_manifest
+        self.compare_manifest = compare_manifest
+        self.diff_entries = [item for item in entries if isinstance(item, DiffEntry)]
+        self._invalidate_diff_dataset_cache()
+        self._prepare_entry_search_cache()
+        self._apply_filters_to_table()
+        self._update_scope_badges(self.diff_entries)
+
+        base_id = bundle.get("base_id")
+        compare_id = bundle.get("compare_id")
+        if isinstance(base_id, str):
+            self._set_combo_value(self.base_selector, base_id)
+            self.current_project.last_base_snapshot_id = base_id
+        if isinstance(compare_id, str):
+            self._set_combo_value(self.compare_selector, compare_id)
+            self.current_project.last_compare_snapshot_id = compare_id
+
+        saved_snapshot_id = bundle.get("saved_snapshot_id")
+        snapshots = bundle.get("snapshots")
+        if isinstance(snapshots, list):
+            self._apply_snapshot_records([item for item in snapshots if isinstance(item, SnapshotRecord)])
+        if isinstance(saved_snapshot_id, str):
+            self._set_combo_value(self.compare_selector, saved_snapshot_id)
+
+        scope_paths = bundle.get("scope_paths")
+        if isinstance(scope_paths, list):
+            self._apply_scope_tree_paths([str(item) for item in scope_paths])
+
+        if isinstance(csv_path, str):
+            self.last_compare_csv_path = csv_path
+            self.statusBar().showMessage(
+                self._t("msg.compare_done_csv_path", name=Path(csv_path).name, path=csv_path),
+                12000,
+            )
+        else:
+            self.statusBar().showMessage(self._t("msg.compare_done"), 5000)
+        self._history_dirty = True
+        if self.history_dock.isVisible() and not self._scope_build_active:
+            self._ensure_history_loaded(force=True)
 
     def _ask_compare_with_unsaved_state(self) -> str:
         msg = QMessageBox(self)
@@ -873,48 +1435,11 @@ class RecheckMainWindow(QMainWindow):
             return "cancel"
         return "cancel"
 
-    def _is_current_root_state_unsaved(self) -> bool:
-        if not self.current_project:
-            return False
-        root = Path(self.current_project.root_folder).resolve()
-        try:
-            current_scan = scan_folder(str(root), self.current_project.exclude_rules)
-        except Exception:
-            return False
-        current_map = {item.relative_path: (item.size, item.modified_time) for item in current_scan}
-
-        latest_root_snapshot: SnapshotRecord | None = None
-        for snapshot in self.snapshots:
-            if Path(snapshot.source_folder).resolve() == root:
-                latest_root_snapshot = snapshot
-                break
-
-        if latest_root_snapshot is None:
-            return len(current_map) > 0
-
-        manifest = self.snapshot_store.load_manifest(self.current_project, latest_root_snapshot.snapshot_id)
-        snapshot_map = {item.relative_path: (item.size, item.modified_time) for item in manifest.files}
-        return current_map != snapshot_map
-
     def _status_label(self, status: str) -> str:
         return self._t(f"status.{status}")
 
     def _format_table_timestamp(self, value: str | None) -> str:
-        if not value:
-            return "-"
-        normalized = value.strip()
-        if not normalized:
-            return "-"
-        try:
-            dt = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
-            if dt.tzinfo is not None:
-                dt = dt.astimezone(JST)
-            return dt.strftime("%Y-%m-%d %H:%M:%S")
-        except Exception:
-            if "T" in normalized:
-                fallback = normalized.replace("T", " ")
-                return fallback.split(".")[0][:19]
-            return normalized
+        return format_display_timestamp(value)
 
     def _parent_path_display(self, relative_path: str) -> str:
         parent = normalize_relpath(str(Path(relative_path).parent))
@@ -941,6 +1466,54 @@ class RecheckMainWindow(QMainWindow):
         for entry in entries:
             counts[entry.status] = counts.get(entry.status, 0) + 1
         return counts
+
+    def _entry_key(self, entry: DiffEntry) -> tuple[str, str, str]:
+        return (entry.relative_path, entry.status, entry.file_name)
+
+    def _invalidate_diff_dataset_cache(self) -> None:
+        self._diff_dataset_version += 1
+        self._scope_filter_cache_key = None
+        self._scope_filter_cache_entries = []
+        self._scope_filter_status_groups = {status: [] for status in STATUSES}
+        self._scope_filter_counts = {status: 0 for status in STATUSES}
+        self._entry_search_texts = {}
+
+    def _prepare_entry_search_cache(self) -> None:
+        self._entry_search_texts = {
+            self._entry_key(entry): f"{entry.file_name.lower()}\n{entry.relative_path.lower()}" for entry in self.diff_entries
+        }
+
+    def _resolve_scope_filter_bundle(self) -> tuple[list[DiffEntry], dict[str, list[DiffEntry]], dict[str, int]]:
+        mode = self._current_scope_mode()
+        folders = tuple(self._selected_scope_folders()) if mode == "selected" else tuple()
+        cache_key = (self._diff_dataset_version, mode, folders)
+        if self._scope_filter_cache_key == cache_key:
+            return self._scope_filter_cache_entries, self._scope_filter_status_groups, self._scope_filter_counts
+
+        if mode == "whole" or not folders or "" in folders:
+            scope_entries = list(self.diff_entries)
+        else:
+            folder_list = list(folders)
+            scope_entries = []
+            for entry in self.diff_entries:
+                rel = normalize_relpath(entry.relative_path)
+                for folder in folder_list:
+                    if rel == folder or rel.startswith(f"{folder}/"):
+                        scope_entries.append(entry)
+                        break
+
+        status_groups = {status: [] for status in STATUSES}
+        for entry in scope_entries:
+            bucket = status_groups.get(entry.status)
+            if bucket is not None:
+                bucket.append(entry)
+        counts = {status: len(status_groups.get(status, [])) for status in STATUSES}
+
+        self._scope_filter_cache_key = cache_key
+        self._scope_filter_cache_entries = scope_entries
+        self._scope_filter_status_groups = status_groups
+        self._scope_filter_counts = counts
+        return scope_entries, status_groups, counts
 
     def _scope_filtered_entries(self, entries: list[DiffEntry]) -> list[DiffEntry]:
         if self._current_scope_mode() == "whole":
@@ -972,91 +1545,167 @@ class RecheckMainWindow(QMainWindow):
                 button.setChecked(key == status)
         self._apply_filters_to_table()
 
+    def _on_search_text_changed(self) -> None:
+        # Debounce search-triggered rebinding for large datasets.
+        self._search_apply_timer.start()
+
     def _apply_filters_to_table(self) -> None:
+        apply_start = perf_counter()
+        self._table_render_token += 1
+        token = self._table_render_token
+        self._table_render_active = False
         current_key = None
         if self.current_entry:
             current_key = (self.current_entry.relative_path, self.current_entry.status, self.current_entry.file_name)
 
-        scope_filtered = self._scope_filtered_entries(self.diff_entries)
-        self.latest_counts = self._count_entries(scope_filtered)
+        scope_filtered, status_groups, scope_counts = self._resolve_scope_filter_bundle()
+        self.latest_counts = dict(scope_counts)
         self._update_summary_counts(self.latest_counts)
         self._update_scope_path_label()
 
         search = self.search_box.text().strip().lower()
-        filtered = scope_filtered
-        if self.current_status_filter != "all":
-            filtered = [entry for entry in filtered if entry.status == self.current_status_filter]
+        filtered = scope_filtered if self.current_status_filter == "all" else status_groups.get(self.current_status_filter, [])
         if search:
+            search_cache = self._entry_search_texts
             filtered = [
                 entry
                 for entry in filtered
-                if search in entry.file_name.lower() or search in entry.relative_path.lower()
+                if search in search_cache.get(self._entry_key(entry), f"{entry.file_name.lower()}\n{entry.relative_path.lower()}")
             ]
 
         self.visible_entries = filtered
+        selected_row = None
+        if current_key:
+            for idx, entry in enumerate(filtered):
+                if (entry.relative_path, entry.status, entry.file_name) == current_key:
+                    selected_row = idx
+                    break
+
+        self._table_render_entries = filtered
+        self._table_render_row = 0
+        self._table_render_selected_row = selected_row
+        self._table_render_target_key = current_key
+
+        self._suppress_selection_events = True
         self.diff_table.setSortingEnabled(False)
         self.diff_table.setRowCount(len(filtered))
-        selected_row = None
+        self._suppress_selection_events = False
 
-        for row, entry in enumerate(filtered):
-            file_display = entry.file_name
-            parent_display = self._parent_path_display(entry.relative_path)
-            row_items = [
-                self._status_label(entry.status),
-                file_display,
-                parent_display,
-                self._format_table_timestamp(entry.base_modified_time),
-                self._format_table_timestamp(entry.compare_modified_time),
-                "-" if entry.base_size is None else str(entry.base_size),
-                "-" if entry.compare_size is None else str(entry.compare_size),
-            ]
-            for col, value in enumerate(row_items):
-                item = QTableWidgetItem(value)
-                if col == 0:
-                    item.setData(Qt.ItemDataRole.UserRole, asdict(entry))
-                    status_colors = {
-                        "added": QColor("#e9f6ed"),
-                        "removed": QColor("#faecec"),
-                        "modified": QColor("#ecf3fa"),
-                        "unchanged": QColor("#f2f3f5"),
-                    }
-                    item.setBackground(QBrush(status_colors.get(entry.status, QColor("#ffffff"))))
-                if col == 1:
-                    item.setToolTip(entry.relative_path)
-                if col == 2:
-                    item.setToolTip(entry.relative_path)
-                    item.setForeground(QBrush(QColor("#5f7387")))
-                if col == 3 and entry.base_modified_time:
-                    item.setToolTip(entry.base_modified_time)
-                if col == 4 and entry.compare_modified_time:
-                    item.setToolTip(entry.compare_modified_time)
-                self.diff_table.setItem(row, col, item)
-            self.diff_table.setRowHeight(row, self._diff_row_height())
-            row_key = (entry.relative_path, entry.status, entry.file_name)
-            if current_key and row_key == current_key:
-                selected_row = row
-        self.diff_table.setSortingEnabled(True)
-
-        if filtered and selected_row is not None:
-            self.diff_table.selectRow(selected_row)
-            self.current_entry = filtered[selected_row]
-            self._update_preview(self.current_entry)
-        elif filtered:
-            self.diff_table.selectRow(0)
-            self.current_entry = filtered[0]
-            self._update_preview(self.current_entry)
-        else:
+        if not filtered:
             self.current_entry = None
             self._update_preview(None)
+            self.diff_table.setSortingEnabled(True)
+            self._last_apply_duration_ms = (perf_counter() - apply_start) * 1000.0
+            LOGGER.debug("diff table apply complete: rows=%d elapsed_ms=%.2f", 0, self._last_apply_duration_ms)
+            return
+
+        target_row = selected_row if selected_row is not None else 0
+        if 0 <= target_row < len(filtered):
+            self.current_entry = filtered[target_row]
+            self._update_preview(self.current_entry)
+
+        self._table_render_active = True
+        self.statusBar().showMessage(
+            self._t("msg.rendering_results_progress", done=0, total=len(filtered)),
+            2000,
+        )
+        QTimer.singleShot(0, lambda t=token, started=apply_start: self._populate_table_chunk(t, started))
+
+    def _build_table_row_items(self, entry: DiffEntry) -> list[QTableWidgetItem]:
+        row_items = [
+            self._status_label(entry.status),
+            entry.file_name,
+            self._parent_path_display(entry.relative_path),
+            self._format_table_timestamp(entry.base_modified_time),
+            self._format_table_timestamp(entry.compare_modified_time),
+            "-" if entry.base_size is None else str(entry.base_size),
+            "-" if entry.compare_size is None else str(entry.compare_size),
+        ]
+        items: list[QTableWidgetItem] = []
+        for col, value in enumerate(row_items):
+            item = QTableWidgetItem(value)
+            if col == 0:
+                item.setData(Qt.ItemDataRole.UserRole, entry)
+                status_colors = {
+                    "added": QColor("#e9f6ed"),
+                    "removed": QColor("#faecec"),
+                    "modified": QColor("#ecf3fa"),
+                    "unchanged": QColor("#f2f3f5"),
+                }
+                item.setBackground(QBrush(status_colors.get(entry.status, QColor("#ffffff"))))
+            if col == 1:
+                item.setToolTip(entry.relative_path)
+            if col == 2:
+                item.setToolTip(entry.relative_path)
+                item.setForeground(QBrush(QColor("#5f7387")))
+            if col == 3 and entry.base_modified_time:
+                item.setToolTip(entry.base_modified_time)
+            if col == 4 and entry.compare_modified_time:
+                item.setToolTip(entry.compare_modified_time)
+            items.append(item)
+        return items
+
+    def _populate_table_chunk(self, token: int, apply_start: float) -> None:
+        if token != self._table_render_token:
+            return
+        if not self._table_render_active:
+            return
+
+        total = len(self._table_render_entries)
+        if total == 0:
+            self._table_render_active = False
+            self.diff_table.setSortingEnabled(True)
+            return
+
+        chunk_size = 400
+        end = min(total, self._table_render_row + chunk_size)
+        self._suppress_selection_events = True
+        for row in range(self._table_render_row, end):
+            entry = self._table_render_entries[row]
+            for col, item in enumerate(self._build_table_row_items(entry)):
+                self.diff_table.setItem(row, col, item)
+        self._suppress_selection_events = False
+        self._table_render_row = end
+
+        if end < total:
+            self.statusBar().showMessage(
+                self._t("msg.rendering_results_progress", done=end, total=total),
+                2000,
+            )
+            QTimer.singleShot(0, lambda t=token, started=apply_start: self._populate_table_chunk(t, started))
+            return
+
+        self._table_render_active = False
+        self.diff_table.setSortingEnabled(True)
+        target_row = self._table_render_selected_row if self._table_render_selected_row is not None else 0
+        if 0 <= target_row < total:
+            self._suppress_selection_events = True
+            self.diff_table.selectRow(target_row)
+            self._suppress_selection_events = False
+            self.current_entry = self._table_render_entries[target_row]
+            self._update_preview(self.current_entry)
+        self._last_apply_duration_ms = (perf_counter() - apply_start) * 1000.0
+        LOGGER.debug(
+            "diff table apply complete: rows=%d elapsed_ms=%.2f",
+            total,
+            self._last_apply_duration_ms,
+        )
 
     def _on_diff_selection_changed(self) -> None:
+        if self._suppress_selection_events:
+            return
         selected = self.diff_table.selectedItems()
         if not selected:
             return
         payload = selected[0].data(Qt.ItemDataRole.UserRole)
         if not payload:
             return
-        entry = DiffEntry.from_dict(payload)
+        if isinstance(payload, DiffEntry):
+            entry = payload
+        elif isinstance(payload, dict):
+            entry = DiffEntry.from_dict(payload)
+        else:
+            return
         self.current_entry = entry
         self._update_preview(entry)
 
@@ -1127,43 +1776,201 @@ class RecheckMainWindow(QMainWindow):
             return
         open_external(str(target))
 
-    def _refresh_scope_tree(self) -> None:
+    def _apply_scope_tree_paths(self, scope_paths: list[str]) -> None:
         checked_paths: set[str] = set(self._scope_checked_paths)
         checked_paths.update(self._capture_scope_checks())
         self._scope_checked_paths = {normalize_relpath(path) for path in checked_paths}
+
+        self._scope_build_token += 1
+        token = self._scope_build_token
+        self._scope_expand_token += 1
+        self._scope_build_active = True
+        self._set_busy(True, self._t("msg.loading_scope_tree"))
+
+        children_map: dict[str, list[str]] = {}
+        for raw_rel in scope_paths:
+            rel = normalize_relpath(str(raw_rel))
+            if not rel or rel == ".":
+                continue
+            parent_rel = normalize_relpath(str(Path(rel).parent)) if "/" in rel else ""
+            if parent_rel == ".":
+                parent_rel = ""
+            children_map.setdefault(parent_rel, []).append(rel)
+        self._scope_children_map = children_map
 
         self.scope_tree.blockSignals(True)
         self.scope_tree.clear()
         if not self.current_project:
             self.scope_tree.blockSignals(False)
+            self._scope_build_active = False
+            self._set_busy(False)
             return
 
         root_path = Path(self.current_project.root_folder)
-        root_item = QTreeWidgetItem([root_path.name or str(root_path)])
+        self._scope_build_root_name = root_path.name or str(root_path)
+        root_item = QTreeWidgetItem([self._scope_build_root_name])
         root_item.setData(0, Qt.ItemDataRole.UserRole, "")
-        root_item.setData(0, Qt.ItemDataRole.UserRole + 1, root_path.name or str(root_path))
+        root_item.setData(0, Qt.ItemDataRole.UserRole + 1, self._scope_build_root_name)
         root_item.setFlags(root_item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
         root_item.setCheckState(0, Qt.CheckState.Checked if "" in self._scope_checked_paths else Qt.CheckState.Unchecked)
+        root_item.setData(0, Qt.ItemDataRole.UserRole + 2, True)
         self.scope_tree.addTopLevelItem(root_item)
 
-        rel_to_item: dict[str, QTreeWidgetItem] = {"": root_item}
-        if root_path.exists():
-            for directory in sorted([p for p in root_path.rglob("*") if p.is_dir()]):
-                rel = normalize_relpath(str(directory.relative_to(root_path)))
-                parent_rel = normalize_relpath(str(Path(rel).parent)) if "/" in rel else ""
-                if parent_rel == ".":
-                    parent_rel = ""
-                parent_item = rel_to_item.get(parent_rel, root_item)
-                item = QTreeWidgetItem([directory.name])
-                item.setCheckState(0, Qt.CheckState.Checked if rel in self._scope_checked_paths else Qt.CheckState.Unchecked)
-                item.setData(0, Qt.ItemDataRole.UserRole, rel)
-                item.setData(0, Qt.ItemDataRole.UserRole + 1, directory.name)
-                parent_item.addChild(item)
-                rel_to_item[rel] = item
+        self._scope_build_rel_to_item = {"": root_item}
+        self._scope_materialized_paths = {""}
+        self._scope_build_queue = deque(self._scope_children_map.get("", []))
+        self._scope_build_total = len(self._scope_build_queue)
+        self._scope_build_done = 0
+        self.scope_tree.setEnabled(False)
+        QTimer.singleShot(0, lambda t=token: self._process_scope_tree_chunk(t))
 
-        self.scope_tree.expandToDepth(1)
+    def _process_scope_tree_chunk(self, token: int) -> None:
+        if token != self._scope_build_token:
+            return
+        chunk_size = 500
+        processed = 0
+        root_item = self._scope_build_rel_to_item.get("")
+        if root_item is None:
+            return
+        while self._scope_build_queue and processed < chunk_size:
+            rel = normalize_relpath(self._scope_build_queue.popleft())
+            if not rel or rel == ".":
+                processed += 1
+                continue
+            self._create_scope_tree_item(parent_item=root_item, rel=rel)
+            processed += 1
+            self._scope_build_done += 1
+
+        if self._scope_build_queue:
+            self.statusBar().showMessage(
+                self._t("msg.loading_scope_tree_progress", done=self._scope_build_done, total=self._scope_build_total)
+            )
+            QTimer.singleShot(0, lambda t=token: self._process_scope_tree_chunk(t))
+            return
+
+        root_item.setExpanded(True)
         self._apply_scope_tree_mode_visuals()
         self.scope_tree.blockSignals(False)
+        self.scope_tree.setEnabled(True)
+        self._scope_build_active = False
+        self._set_busy(False)
+        self._update_scope_path_label()
+        self._update_scope_badges(self.diff_entries)
+        if self.history_dock.isVisible() and self._history_dirty:
+            self._ensure_history_loaded()
+
+    def _create_scope_tree_item(self, *, parent_item: QTreeWidgetItem, rel: str) -> QTreeWidgetItem | None:
+        rel_normalized = normalize_relpath(rel)
+        if rel_normalized in self._scope_materialized_paths:
+            return self._scope_build_rel_to_item.get(rel_normalized)
+
+        item = QTreeWidgetItem([Path(rel_normalized).name])
+        item.setCheckState(0, Qt.CheckState.Checked if rel_normalized in self._scope_checked_paths else Qt.CheckState.Unchecked)
+        item.setData(0, Qt.ItemDataRole.UserRole, rel_normalized)
+        item.setData(0, Qt.ItemDataRole.UserRole + 1, Path(rel_normalized).name)
+
+        child_paths = self._scope_children_map.get(rel_normalized, [])
+        children_loaded = len(child_paths) == 0
+        item.setData(0, Qt.ItemDataRole.UserRole + 2, children_loaded)
+        parent_item.addChild(item)
+
+        if not children_loaded:
+            placeholder = QTreeWidgetItem([""])
+            placeholder.setData(0, Qt.ItemDataRole.UserRole + 3, True)
+            item.addChild(placeholder)
+
+        self._scope_build_rel_to_item[rel_normalized] = item
+        self._scope_materialized_paths.add(rel_normalized)
+        return item
+
+    def _on_scope_item_expanded(self, item: QTreeWidgetItem) -> None:
+        if self._scope_build_active:
+            return
+        rel = item.data(0, Qt.ItemDataRole.UserRole)
+        if rel is None:
+            return
+        rel_normalized = normalize_relpath(str(rel))
+        if rel_normalized == ".":
+            rel_normalized = ""
+        if item.data(0, Qt.ItemDataRole.UserRole + 2) is True:
+            return
+
+        children = self._scope_children_map.get(rel_normalized, [])
+        if not children:
+            item.setData(0, Qt.ItemDataRole.UserRole + 2, True)
+            return
+
+        item.setData(0, Qt.ItemDataRole.UserRole + 2, "loading")
+        for idx in range(item.childCount() - 1, -1, -1):
+            child = item.child(idx)
+            if child.data(0, Qt.ItemDataRole.UserRole + 3):
+                item.removeChild(child)
+
+        self._scope_expand_token += 1
+        expand_token = self._scope_expand_token
+        QTimer.singleShot(
+            0,
+            lambda t=expand_token, parent=item, child_rels=list(children), start=0: self._append_scope_children_chunk(
+                t,
+                parent,
+                child_rels,
+                start,
+            ),
+        )
+
+    def _append_scope_children_chunk(
+        self,
+        token: int,
+        parent_item: QTreeWidgetItem,
+        children: list[str],
+        start: int,
+    ) -> None:
+        if token != self._scope_expand_token:
+            return
+        if parent_item.treeWidget() is None:
+            return
+        if self.current_project is None:
+            return
+
+        chunk_size = 300
+        end = min(len(children), start + chunk_size)
+        for rel in children[start:end]:
+            self._create_scope_tree_item(parent_item=parent_item, rel=rel)
+
+        if end < len(children):
+            QTimer.singleShot(
+                0,
+                lambda t=token, parent=parent_item, child_rels=children, next_start=end: self._append_scope_children_chunk(
+                    t,
+                    parent,
+                    child_rels,
+                    next_start,
+                ),
+            )
+            return
+
+        parent_item.setData(0, Qt.ItemDataRole.UserRole + 2, True)
+        self._apply_scope_tree_mode_visuals()
+        self._update_scope_badges(self.diff_entries)
+
+    def _request_scope_tree_refresh(self) -> None:
+        if not self.current_project:
+            return
+        project_id = self.current_project.project_id
+        root_folder = self.current_project.root_folder
+
+        def _on_loaded(payload: object) -> None:
+            if not self.current_project or self.current_project.project_id != project_id:
+                return
+            paths = payload if isinstance(payload, list) else []
+            self._apply_scope_tree_paths([str(item) for item in paths])
+
+        self._start_background_task(
+            task_name="scope_refresh",
+            status_message=self._t("msg.loading_scope_tree"),
+            fn=lambda root=root_folder: self._scan_scope_paths(root),
+            on_success=_on_loaded,
+        )
 
     def _update_scope_badges(self, entries: list[DiffEntry]) -> None:
         folder_counts: dict[str, int] = {}
@@ -1216,7 +2023,9 @@ class RecheckMainWindow(QMainWindow):
         rel = changed.data(0, Qt.ItemDataRole.UserRole)
         if rel is None:
             return
-        self._scope_checked_paths = self._capture_scope_checks()
+        current = self._capture_scope_checks()
+        preserved_unmaterialized = {path for path in self._scope_checked_paths if path not in self._scope_materialized_paths}
+        self._scope_checked_paths = {normalize_relpath(path) for path in current.union(preserved_unmaterialized)}
         self._update_scope_path_label()
         self._apply_filters_to_table()
         if not self._selected_scope_folders() and self.diff_entries:
@@ -1264,6 +2073,36 @@ class RecheckMainWindow(QMainWindow):
         else:
             self.history_dock.show()
             self.history_dock.raise_()
+            self._ensure_history_loaded()
+
+    def _ensure_history_loaded(self, *, force: bool = False) -> None:
+        if not self.current_project:
+            return
+        if not force and not self._history_dirty:
+            return
+        project_id = self.current_project.project_id
+        self._start_background_task(
+            task_name="history_load",
+            status_message=self._t("msg.loading_history"),
+            fn=lambda pid=project_id: self._task_load_history_bundle(pid),
+            on_success=self._on_history_loaded,
+        )
+
+    def _on_history_loaded(self, payload: object) -> None:
+        bundle = payload if isinstance(payload, dict) else {}
+        if not self.current_project:
+            return
+        if bundle.get("project_id") != self.current_project.project_id:
+            return
+        snapshots = bundle.get("snapshots", [])
+        if isinstance(snapshots, list):
+            self.snapshots = [item for item in snapshots if isinstance(item, SnapshotRecord)]
+            self.history_panel.set_snapshots(self.snapshots)
+        compare_logs = bundle.get("compare_logs", [])
+        if isinstance(compare_logs, list):
+            self.compare_logs = [item for item in compare_logs if isinstance(item, CompareLogRecord)]
+            self.history_panel.set_compares(self.compare_logs)
+        self._history_dirty = False
 
     def _toggle_preview_pane(self) -> None:
         self._apply_preview_pane_visibility(not self.settings.preview_pane_visible)
@@ -1339,9 +2178,10 @@ class RecheckMainWindow(QMainWindow):
         self.mode_whole.blockSignals(False)
         self.mode_selected.blockSignals(False)
         self._scope_checked_paths = {normalize_relpath(path) for path in record.scope_folders}
-        self._refresh_scope_tree()
         self._apply_scope_tree_mode_visuals()
         self.diff_entries = record.entries
+        self._invalidate_diff_dataset_cache()
+        self._prepare_entry_search_cache()
         self._apply_filters_to_table()
 
     def _open_project_menu(self) -> None:
@@ -1455,7 +2295,7 @@ class RecheckMainWindow(QMainWindow):
             return
         self.current_project.root_folder = path
         self.project_store.save_project(self.current_project)
-        self._refresh_scope_tree()
+        self._request_scope_tree_refresh()
 
     def _edit_exclude_rules(self) -> None:
         if not self.current_project:
@@ -1499,41 +2339,13 @@ class RecheckMainWindow(QMainWindow):
         compare_snapshot_id: str,
         entries: list[DiffEntry],
     ) -> str:
-        export_dir = project_storage_dir / "compare_exports"
-        export_dir.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        project_slug = safe_slug(self.current_project.name if self.current_project else "project")
-        base_slug = safe_slug(base_snapshot_id)[:24]
-        compare_slug = safe_slug(compare_snapshot_id)[:24]
-        file_name = f"{project_slug}_{stamp}_base-{base_slug}_compare-{compare_slug}.csv"
-        csv_path = export_dir / file_name
-
-        with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
-            writer = csv.writer(handle)
-            writer.writerow(
-                [
-                    "kind",
-                    "filename",
-                    "relative_path",
-                    "base_modified",
-                    "compare_modified",
-                    "base_size",
-                    "compare_size",
-                ]
-            )
-            for entry in entries:
-                writer.writerow(
-                    [
-                        entry.status,
-                        entry.file_name,
-                        entry.relative_path,
-                        self._format_table_timestamp(entry.base_modified_time),
-                        self._format_table_timestamp(entry.compare_modified_time),
-                        "" if entry.base_size is None else entry.base_size,
-                        "" if entry.compare_size is None else entry.compare_size,
-                    ]
-                )
-        return str(csv_path)
+        return write_compare_csv_file(
+            project_storage_dir=project_storage_dir,
+            project_name=self.current_project.name if self.current_project else "project",
+            base_snapshot_id=base_snapshot_id,
+            compare_snapshot_id=compare_snapshot_id,
+            entries=entries,
+        )
 
     def _export_project(self) -> None:
         if not self.current_project:
