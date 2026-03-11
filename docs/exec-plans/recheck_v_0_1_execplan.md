@@ -392,3 +392,13 @@ v0.1 MVP は以下を満たしたら完了とする。
 - Moved preview collapse UX to pane-local header control.
 - Standardized visible diff-table timestamps to `YYYY-MM-DD HH:MM:SS`.
 - Clarified Base/Compare role labels as previous/current snapshot flow.
+
+## v0.1 delta note (2026-03-11, polish-2)
+- Refined header composition for dense use: compact project row plus clear Base/Compare selector area with directional hint.
+- Increased diff-table density and kept filename rendering single-line for scanability.
+- Changed relative path rendering to show parent folder only, with explicit root marker for root-level files.
+- Added app-level text size setting and keyboard controls (`Ctrl+0`, `Ctrl+=`, `Ctrl+-`).
+- Added automatic CSV export on compare execution under `compare_exports` with datetime naming.
+- Added project-menu action to open compare CSV export folder quickly.
+- Added lightweight productivity shortcuts (`Ctrl+Enter`, `Ctrl+S`, `Ctrl+H`, `Ctrl+F`, `Esc`).
+- Added subtle scope tree cues for changed folders (added/modified) while preserving calm UI.

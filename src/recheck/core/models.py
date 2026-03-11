@@ -37,6 +37,7 @@ class ProjectConfig:
 @dataclass
 class AppSettings:
     language: str = "ja"
+    ui_text_size: str = "medium"
     preview_cache_max_generations: int = 5
     preview_cache_max_total_size_gb: float = 10.0
     preview_cache_target_extensions: list[str] = field(default_factory=list)
@@ -56,6 +57,7 @@ class AppSettings:
     def from_dict(cls, data: dict[str, Any]) -> "AppSettings":
         return cls(
             language=str(data.get("language", "ja")),
+            ui_text_size=str(data.get("ui_text_size", "medium")),
             preview_cache_max_generations=int(data.get("preview_cache_max_generations", 5)),
             preview_cache_max_total_size_gb=float(data.get("preview_cache_max_total_size_gb", 10.0)),
             preview_cache_target_extensions=list(data.get("preview_cache_target_extensions", [])),

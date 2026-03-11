@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import csv
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import (
     QDockWidget,
     QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -50,7 +52,7 @@ from recheck.ui.settings_dialog import SettingsDialog
 from recheck.ui.setup_dialog import SetupDialog
 from recheck.utils.filetype_utils import detect_preview_type
 from recheck.utils.open_external import open_external
-from recheck.utils.path_utils import normalize_relpath
+from recheck.utils.path_utils import normalize_relpath, safe_slug
 
 STATUSES = ("added", "removed", "modified", "unchanged")
 
@@ -83,6 +85,8 @@ class RecheckMainWindow(QMainWindow):
         self.preview_content: QWidget | None = None
         self.preview_collapsed_hint: QLabel | None = None
         self._last_splitter_sizes = [290, 530, 560]
+        self.last_compare_csv_path: str | None = None
+        self._shortcuts: list[QShortcut] = []
 
         self.setWindowTitle("Re:Check - Diff Review for folders")
         self.resize(1580, 920)
@@ -131,27 +135,48 @@ class RecheckMainWindow(QMainWindow):
 
         shortcut = QShortcut(QKeySequence("Ctrl+K"), self)
         shortcut.activated.connect(self._show_command_palette_stub)
+        self._shortcuts.append(shortcut)
+        self._setup_shortcuts()
         self.statusBar().showMessage(self._t("msg.ready"))
         self._apply_preview_pane_visibility(self.settings.preview_pane_visible, persist=False, notify=False)
+
+    def _setup_shortcuts(self) -> None:
+        bindings: list[tuple[str, callable]] = [
+            ("Ctrl+Enter", self._execute_compare),
+            ("Ctrl+Return", self._execute_compare),
+            ("Ctrl+S", self._save_snapshot),
+            ("Ctrl+H", self._toggle_history_panel),
+            ("Ctrl+F", self._focus_diff_search),
+            ("Esc", self._collapse_preview_from_shortcut),
+            ("Ctrl+0", lambda: self._set_ui_text_size("medium")),
+            ("Ctrl+=", self._increase_ui_text_size),
+            ("Ctrl++", self._increase_ui_text_size),
+            ("Ctrl+-", self._decrease_ui_text_size),
+        ]
+        for sequence, callback in bindings:
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.activated.connect(callback)
+            self._shortcuts.append(shortcut)
 
     def _build_header(self) -> QWidget:
         panel = QFrame()
         panel.setObjectName("headerPanel")
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(10)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(8)
 
         row1 = QHBoxLayout()
-        title_box = QVBoxLayout()
-        title_box.setSpacing(2)
+        row1.setSpacing(8)
+        title_box = QHBoxLayout()
+        title_box.setSpacing(8)
         self.app_title = QLabel("Re:Check")
         self.app_title.setObjectName("appTitle")
         self.app_subtitle = QLabel("Diff Review for folders")
-        self.app_subtitle.setObjectName("appSubtitle")
+        self.app_subtitle.setObjectName("appSubtitleInline")
         title_box.addWidget(self.app_title)
         title_box.addWidget(self.app_subtitle)
+        title_box.addStretch(1)
         row1.addLayout(title_box)
-        row1.addStretch(1)
 
         actions = QHBoxLayout()
         actions.setSpacing(6)
@@ -178,37 +203,47 @@ class RecheckMainWindow(QMainWindow):
         row2.addWidget(self.project_label)
         self.project_selector = QComboBox()
         self.project_selector.currentIndexChanged.connect(self._on_project_changed)
-        self.project_selector.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        row2.addWidget(self.project_selector, 1)
+        self.project_selector.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.project_selector.setMaximumWidth(420)
+        row2.addWidget(self.project_selector)
 
         self.project_menu_button = QPushButton("...")
         self.project_menu_button.setFixedWidth(36)
         self.project_menu_button.clicked.connect(self._open_project_menu)
         row2.addWidget(self.project_menu_button)
+        row2.addStretch(1)
+        layout.addLayout(row2)
+
+        row3 = QGridLayout()
+        row3.setHorizontalSpacing(8)
+        row3.setVerticalSpacing(3)
 
         self.base_label = QLabel()
-        row2.addWidget(self.base_label)
+        row3.addWidget(self.base_label, 0, 0)
         self.base_selector = QComboBox()
-        row2.addWidget(self.base_selector, 3)
+        row3.addWidget(self.base_selector, 1, 0)
 
         self.base_compare_hint = QLabel()
         self.base_compare_hint.setObjectName("flowHint")
-        row2.addWidget(self.base_compare_hint)
+        self.base_compare_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        row3.addWidget(self.base_compare_hint, 0, 1, 2, 1)
 
         self.compare_label = QLabel()
-        row2.addWidget(self.compare_label)
+        row3.addWidget(self.compare_label, 0, 2)
         self.compare_selector = QComboBox()
-        row2.addWidget(self.compare_selector, 3)
+        row3.addWidget(self.compare_selector, 1, 2)
 
         self.snapshot_button = QPushButton()
         self.snapshot_button.clicked.connect(self._save_snapshot)
-        row2.addWidget(self.snapshot_button)
+        row3.addWidget(self.snapshot_button, 1, 3)
 
         self.date_compare_button = QPushButton()
         self.date_compare_button.clicked.connect(self._select_snapshots_by_date)
-        row2.addWidget(self.date_compare_button)
+        row3.addWidget(self.date_compare_button, 1, 4)
 
-        layout.addLayout(row2)
+        row3.setColumnStretch(0, 4)
+        row3.setColumnStretch(2, 4)
+        layout.addLayout(row3)
         return panel
 
     def _build_scope_pane(self) -> QWidget:
@@ -295,8 +330,9 @@ class RecheckMainWindow(QMainWindow):
         self.diff_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.diff_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.diff_table.verticalHeader().setVisible(False)
+        self.diff_table.setWordWrap(False)
         self.diff_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self.diff_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.diff_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.diff_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.diff_table.setSortingEnabled(True)
         self.diff_table.itemSelectionChanged.connect(self._on_diff_selection_changed)
@@ -370,63 +406,66 @@ class RecheckMainWindow(QMainWindow):
         return panel
 
     def _apply_style(self) -> None:
+        base_size = {"small": 12, "medium": 13, "large": 15}.get(getattr(self.settings, "ui_text_size", "medium"), 13)
+        title_size = base_size + 8
+        pane_title_size = base_size + 2
         self.setStyleSheet(
-            """
-            QMainWindow, QWidget { font-family: "Segoe UI"; font-size: 13px; color: #25374a; }
-            QFrame#headerPanel, QFrame#scopePane, QFrame#diffPane, QFrame#previewPane {
+            f"""
+            QMainWindow, QWidget {{ font-family: "Segoe UI"; font-size: {base_size}px; color: #25374a; }}
+            QFrame#headerPanel, QFrame#scopePane, QFrame#diffPane, QFrame#previewPane {{
                 background: #f7fafc;
                 border: 1px solid #d6e0ea;
                 border-radius: 10px;
-            }
-            QLabel#appTitle { font-size: 21px; font-weight: 700; color: #153954; }
-            QLabel#appSubtitle { color: #5f7387; padding-top: 2px; }
-            QLabel#paneTitle { font-size: 15px; font-weight: 700; color: #20455f; }
-            QLabel#paneHelp { color: #607487; }
-            QLabel#flowHint { color: #70879b; padding-left: 4px; padding-right: 4px; }
-            QLabel#historyTitle { font-size: 16px; font-weight: 700; }
-            QLabel#previewCollapsedHint {
+            }}
+            QLabel#appTitle {{ font-size: {title_size}px; font-weight: 700; color: #153954; }}
+            QLabel#appSubtitleInline {{ color: #5f7387; padding-top: 2px; }}
+            QLabel#paneTitle {{ font-size: {pane_title_size}px; font-weight: 700; color: #20455f; }}
+            QLabel#paneHelp {{ color: #607487; }}
+            QLabel#flowHint {{ color: #70879b; padding-left: 4px; padding-right: 4px; }}
+            QLabel#historyTitle {{ font-size: {base_size + 3}px; font-weight: 700; }}
+            QLabel#previewCollapsedHint {{
                 color: #5f7387;
                 border: 1px dashed #c9d7e5;
                 border-radius: 6px;
                 background: #f2f6fa;
                 padding: 6px;
-            }
-            QPushButton {
+            }}
+            QPushButton {{
                 background: #e7edf3;
                 border: 1px solid #ccdae7;
                 border-radius: 8px;
                 padding: 6px 10px;
-            }
-            QPushButton:hover { background: #dfe8f1; }
-            QPushButton#primaryButton {
+            }}
+            QPushButton:hover {{ background: #dfe8f1; }}
+            QPushButton#primaryButton {{
                 background: #1f5d92;
                 border: 1px solid #1a4e7a;
                 color: #f8fcff;
                 font-weight: 600;
-            }
-            QPushButton#primaryButton:hover { background: #235f91; }
-            QPushButton#previewCollapseButton { padding: 4px 8px; font-weight: 700; }
-            QPushButton:checked { background: #d3e8ff; border-color: #84b4e8; color: #16364f; }
-            QPushButton#summary_added { background: #e9f6ed; border-color: #bcdcc6; }
-            QPushButton#summary_removed { background: #faecec; border-color: #e8c3c3; }
-            QPushButton#summary_modified { background: #ecf3fa; border-color: #c2d7ee; }
-            QPushButton#summary_unchanged { background: #f2f3f5; border-color: #d2d6dc; }
-            QPushButton#summary_added:checked { background: #cfead8; }
-            QPushButton#summary_removed:checked { background: #f2d8d8; }
-            QPushButton#summary_modified:checked { background: #d7e6f6; }
-            QPushButton#summary_unchanged:checked { background: #e5e7eb; }
-            QLineEdit, QComboBox, QTreeWidget, QTableWidget, QListWidget, QPlainTextEdit {
+            }}
+            QPushButton#primaryButton:hover {{ background: #235f91; }}
+            QPushButton#previewCollapseButton {{ padding: 4px 8px; font-weight: 700; }}
+            QPushButton:checked {{ background: #d3e8ff; border-color: #84b4e8; color: #16364f; }}
+            QPushButton#summary_added {{ background: #e9f6ed; border-color: #bcdcc6; }}
+            QPushButton#summary_removed {{ background: #faecec; border-color: #e8c3c3; }}
+            QPushButton#summary_modified {{ background: #ecf3fa; border-color: #c2d7ee; }}
+            QPushButton#summary_unchanged {{ background: #f2f3f5; border-color: #d2d6dc; }}
+            QPushButton#summary_added:checked {{ background: #cfead8; }}
+            QPushButton#summary_removed:checked {{ background: #f2d8d8; }}
+            QPushButton#summary_modified:checked {{ background: #d7e6f6; }}
+            QPushButton#summary_unchanged:checked {{ background: #e5e7eb; }}
+            QLineEdit, QComboBox, QTreeWidget, QTableWidget, QListWidget, QPlainTextEdit {{
                 border: 1px solid #c9d7e5;
                 border-radius: 7px;
                 background: white;
                 padding: 4px;
-            }
-            QHeaderView::section {
+            }}
+            QHeaderView::section {{
                 background: #edf3f8;
                 padding: 5px;
                 border: 0px;
                 border-bottom: 1px solid #d5e0ea;
-            }
+            }}
             """
         )
 
@@ -751,6 +790,13 @@ class RecheckMainWindow(QMainWindow):
             result=result,
         )
         self._refresh_compare_logs()
+        csv_path = self._save_compare_csv(
+            project_storage_dir=storage_dir,
+            base_snapshot_id=base_id,
+            compare_snapshot_id=compare_id,
+            entries=result.entries,
+        )
+        self.last_compare_csv_path = csv_path
 
         self.current_project.last_base_snapshot_id = base_id
         self.current_project.last_compare_snapshot_id = compare_id
@@ -758,7 +804,7 @@ class RecheckMainWindow(QMainWindow):
 
         scope_label = ", ".join(scope_folders) if scope_folders else self._t("msg.preview_scope_whole")
         self.current_path_label.setText(f"Path: {scope_label}")
-        self.statusBar().showMessage(self._t("msg.compare_done"))
+        self.statusBar().showMessage(self._t("msg.compare_done_csv", name=Path(csv_path).name))
 
     def _ask_compare_with_unsaved_state(self) -> str:
         msg = QMessageBox(self)
@@ -820,6 +866,20 @@ class RecheckMainWindow(QMainWindow):
                 return fallback.split(".")[0][:19]
             return normalized
 
+    def _parent_path_display(self, relative_path: str) -> str:
+        parent = normalize_relpath(str(Path(relative_path).parent))
+        if parent in {"", "."}:
+            return self._t("label.path_root")
+        return parent
+
+    def _diff_row_height(self) -> int:
+        size_key = getattr(self.settings, "ui_text_size", "medium")
+        if size_key == "small":
+            return 24
+        if size_key == "large":
+            return 30
+        return 26
+
     def _update_summary_counts(self, counts: dict[str, int]) -> None:
         total = sum(counts.values())
         self.filter_all_button.setText(f"{self._t('filter.all')} {total}")
@@ -855,11 +915,12 @@ class RecheckMainWindow(QMainWindow):
         self.diff_table.setRowCount(len(filtered))
 
         for row, entry in enumerate(filtered):
-            file_display = f"{entry.file_name}\n{entry.relative_path}"
+            file_display = entry.file_name
+            parent_display = self._parent_path_display(entry.relative_path)
             row_items = [
                 self._status_label(entry.status),
                 file_display,
-                entry.relative_path,
+                parent_display,
                 self._format_table_timestamp(entry.base_modified_time),
                 self._format_table_timestamp(entry.compare_modified_time),
                 "-" if entry.base_size is None else str(entry.base_size),
@@ -886,7 +947,7 @@ class RecheckMainWindow(QMainWindow):
                 if col == 4 and entry.compare_modified_time:
                     item.setToolTip(entry.compare_modified_time)
                 self.diff_table.setItem(row, col, item)
-            self.diff_table.setRowHeight(row, 40)
+            self.diff_table.setRowHeight(row, self._diff_row_height())
         self.diff_table.setSortingEnabled(True)
 
         if filtered:
@@ -1009,6 +1070,8 @@ class RecheckMainWindow(QMainWindow):
 
     def _update_scope_badges(self, entries: list[DiffEntry]) -> None:
         folder_counts: dict[str, int] = {}
+        folder_has_added: set[str] = set()
+        folder_has_modified: set[str] = set()
         for entry in entries:
             if entry.status == "unchanged":
                 continue
@@ -1017,6 +1080,10 @@ class RecheckMainWindow(QMainWindow):
                 rel = ""
             while True:
                 folder_counts[rel] = folder_counts.get(rel, 0) + 1
+                if entry.status == "added":
+                    folder_has_added.add(rel)
+                elif entry.status == "modified":
+                    folder_has_modified.add(rel)
                 if not rel:
                     break
                 parent = normalize_relpath(str(Path(rel).parent))
@@ -1029,6 +1096,12 @@ class RecheckMainWindow(QMainWindow):
             base_name = item.data(0, Qt.ItemDataRole.UserRole + 1) or item.text(0)
             count = folder_counts.get(str(rel), 0)
             item.setText(0, f"{base_name} [{count}]" if count > 0 else str(base_name))
+            if str(rel) in folder_has_added:
+                item.setForeground(0, QBrush(QColor("#2f7d45")))
+            elif str(rel) in folder_has_modified:
+                item.setForeground(0, QBrush(QColor("#2d5f90")))
+            else:
+                item.setForeground(0, QBrush(QColor("#25374a")))
             iterator += 1
 
     def _on_scope_mode_changed(self) -> None:
@@ -1176,6 +1249,10 @@ class RecheckMainWindow(QMainWindow):
         import_action.triggered.connect(self._import_external_folder_as_snapshot)
         menu.addAction(import_action)
 
+        open_exports = QAction(self._t("project.menu.open_compare_exports"), self)
+        open_exports.triggered.connect(self._open_compare_exports_folder)
+        menu.addAction(open_exports)
+
         open_storage = QAction(self._t("project.menu.open_storage"), self)
         open_storage.triggered.connect(self._open_storage_folder)
         menu.addAction(open_storage)
@@ -1256,6 +1333,58 @@ class RecheckMainWindow(QMainWindow):
         storage = self.project_store.project_storage_dir(self.current_project.project_id)
         self._open_path(str(storage))
 
+    def _open_compare_exports_folder(self) -> None:
+        if not self.current_project:
+            return
+        storage = self.project_store.project_storage_dir(self.current_project.project_id)
+        export_dir = storage / "compare_exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        self._open_path(str(export_dir))
+
+    def _save_compare_csv(
+        self,
+        *,
+        project_storage_dir: Path,
+        base_snapshot_id: str,
+        compare_snapshot_id: str,
+        entries: list[DiffEntry],
+    ) -> str:
+        export_dir = project_storage_dir / "compare_exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        project_slug = safe_slug(self.current_project.name if self.current_project else "project")
+        base_slug = safe_slug(base_snapshot_id)[:24]
+        compare_slug = safe_slug(compare_snapshot_id)[:24]
+        file_name = f"{project_slug}_{stamp}_base-{base_slug}_compare-{compare_slug}.csv"
+        csv_path = export_dir / file_name
+
+        with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                [
+                    "kind",
+                    "filename",
+                    "relative_path",
+                    "base_modified",
+                    "compare_modified",
+                    "base_size",
+                    "compare_size",
+                ]
+            )
+            for entry in entries:
+                writer.writerow(
+                    [
+                        entry.status,
+                        entry.file_name,
+                        entry.relative_path,
+                        self._format_table_timestamp(entry.base_modified_time),
+                        self._format_table_timestamp(entry.compare_modified_time),
+                        "" if entry.base_size is None else entry.base_size,
+                        "" if entry.compare_size is None else entry.compare_size,
+                    ]
+                )
+        return str(csv_path)
+
     def _export_project(self) -> None:
         if not self.current_project:
             return
@@ -1290,8 +1419,43 @@ class RecheckMainWindow(QMainWindow):
         self.settings = self.settings_store.save(updated)
         self.i18n.set_language(self.settings.language)
         self.preview_cache_store.prune(self.settings)
+        self._apply_style()
+        self._apply_filters_to_table()
         self._retranslate_ui()
         self.statusBar().showMessage(self._t("settings.saved_restartless"))
+
+    def _focus_diff_search(self) -> None:
+        self.search_box.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.search_box.selectAll()
+
+    def _collapse_preview_from_shortcut(self) -> None:
+        if self.settings.preview_pane_visible:
+            self._apply_preview_pane_visibility(False)
+
+    def _set_ui_text_size(self, size_key: str) -> None:
+        if size_key not in {"small", "medium", "large"}:
+            return
+        if getattr(self.settings, "ui_text_size", "medium") == size_key:
+            return
+        self.settings.ui_text_size = size_key
+        self.settings_store.save(self.settings)
+        self._apply_style()
+        self._apply_filters_to_table()
+        self.statusBar().showMessage(self._t("msg.text_size_changed", size=self._t(f"text_size.{size_key}")), 4000)
+
+    def _increase_ui_text_size(self) -> None:
+        order = ["small", "medium", "large"]
+        current = getattr(self.settings, "ui_text_size", "medium")
+        idx = order.index(current) if current in order else 1
+        if idx < len(order) - 1:
+            self._set_ui_text_size(order[idx + 1])
+
+    def _decrease_ui_text_size(self) -> None:
+        order = ["small", "medium", "large"]
+        current = getattr(self.settings, "ui_text_size", "medium")
+        idx = order.index(current) if current in order else 1
+        if idx > 0:
+            self._set_ui_text_size(order[idx - 1])
 
     def _show_command_palette_stub(self) -> None:
         QMessageBox.information(self, "Ctrl+K", self._t("msg.command_palette_stub"))
@@ -1300,7 +1464,7 @@ class RecheckMainWindow(QMainWindow):
         if not self.snapshots:
             QMessageBox.information(self, self._t("action.compare_by_date"), self._t("msg.no_snapshots"))
             return
-        labels = [f"{s.created_at[:19]} | {s.name} | {s.snapshot_id}" for s in self.snapshots]
+        labels = [f"{self._format_table_timestamp(s.created_at)} | {s.name} | {s.snapshot_id}" for s in self.snapshots]
         base_label, ok = QInputDialog.getItem(
             self,
             self._t("dialog.base_date.title"),

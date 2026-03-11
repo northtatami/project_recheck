@@ -31,6 +31,7 @@ class AppSettingsStore:
     def default_settings(self) -> AppSettings:
         return AppSettings(
             language=_detect_default_language(),
+            ui_text_size="medium",
             preview_cache_max_generations=5,
             preview_cache_max_total_size_gb=10.0,
             preview_cache_target_extensions=list(PREVIEW_CACHE_DEFAULT_EXTENSIONS),
@@ -51,6 +52,8 @@ class AppSettingsStore:
         settings.preview_cache_target_extensions = normalize_extensions(settings.preview_cache_target_extensions)
         if settings.language not in {"ja", "en"}:
             settings.language = "ja"
+        if settings.ui_text_size not in {"small", "medium", "large"}:
+            settings.ui_text_size = "medium"
         settings.preview_pane_visible = bool(settings.preview_pane_visible)
         return settings
 

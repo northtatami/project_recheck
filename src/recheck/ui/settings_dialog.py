@@ -37,6 +37,14 @@ class SettingsDialog(QDialog):
         self.language_combo.setCurrentIndex(idx)
         form.addRow(self._tr("settings.language"), self.language_combo)
 
+        self.text_size_combo = QComboBox()
+        self.text_size_combo.addItem(self._tr("text_size.small"), "small")
+        self.text_size_combo.addItem(self._tr("text_size.medium"), "medium")
+        self.text_size_combo.addItem(self._tr("text_size.large"), "large")
+        text_size_index = max(0, self.text_size_combo.findData(settings.ui_text_size))
+        self.text_size_combo.setCurrentIndex(text_size_index)
+        form.addRow(self._tr("settings.text_size"), self.text_size_combo)
+
         self.max_generations = QSpinBox()
         self.max_generations.setRange(1, 9999)
         self.max_generations.setValue(int(settings.preview_cache_max_generations))
@@ -66,6 +74,7 @@ class SettingsDialog(QDialog):
 
     def build_settings(self, base: AppSettings) -> AppSettings:
         base.language = str(self.language_combo.currentData())
+        base.ui_text_size = str(self.text_size_combo.currentData())
         base.preview_cache_max_generations = int(self.max_generations.value())
         base.preview_cache_max_total_size_gb = float(self.max_size_gb.value())
         base.preview_cache_target_extensions = normalize_extensions(self.extensions.text().split(","))

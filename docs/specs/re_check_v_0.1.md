@@ -581,3 +581,13 @@ v0.1 では以下を保存する。
 - Preview pane collapse/expand is controlled from the preview pane header (pane-local interaction).
 - Diff table timestamps are displayed as `YYYY-MM-DD HH:MM:SS` in main cells.
 - Base/Compare labels are clarified as previous/current snapshot roles.
+
+## v0.1 delta note (2026-03-11, polish-2)
+- Header layout is refined into a compact title row and a clearer Base/Compare two-line selector block with directional cue.
+- Diff list rows are denser for daily review, while keeping filename as a single-line primary column.
+- Relative path column now displays parent folder path only; root-level files show `(root)` / `（ルート）`.
+- App settings now include UI text size (`Small`, `Medium`, `Large`) with shortcut control.
+- Compare execution now auto-saves CSV exports to `compare_exports` with timestamped filenames.
+- Project menu includes quick access to open the compare CSV export folder.
+- Lightweight shortcuts are standardized: `Ctrl+Enter`, `Ctrl+S`, `Ctrl+H`, `Ctrl+F`, `Esc`, `Ctrl+0`, `Ctrl+=`, `Ctrl+-`.
+- Scope tree adds subtle added/modified folder cues without changing the 3-pane interaction model.
