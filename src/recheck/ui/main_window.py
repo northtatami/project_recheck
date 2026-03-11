@@ -332,15 +332,26 @@ class RecheckMainWindow(QMainWindow):
         self.diff_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.diff_table.verticalHeader().setVisible(False)
         self.diff_table.setWordWrap(False)
-        self.diff_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self.diff_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.diff_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.diff_table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
         self.diff_table.horizontalHeader().setFixedHeight(44)
+        self._configure_diff_table_columns()
         self.diff_table.setSortingEnabled(True)
         self.diff_table.itemSelectionChanged.connect(self._on_diff_selection_changed)
         layout.addWidget(self.diff_table, 1)
         return panel
+
+    def _configure_diff_table_columns(self) -> None:
+        header = self.diff_table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        for col in (1, 2, 3, 4, 5, 6):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+        self.diff_table.setColumnWidth(1, 280)
+        self.diff_table.setColumnWidth(2, 240)
+        self.diff_table.setColumnWidth(3, 130)
+        self.diff_table.setColumnWidth(4, 130)
+        self.diff_table.setColumnWidth(5, 88)
+        self.diff_table.setColumnWidth(6, 88)
 
     def _build_preview_pane(self) -> QWidget:
         panel = QFrame()
@@ -507,6 +518,7 @@ class RecheckMainWindow(QMainWindow):
                 self._t("table.compare_size_multiline"),
             ]
         )
+        self._configure_diff_table_columns()
 
         self.preview_title.setText(self._t("label.preview"))
         self.preview_helper.setText(self._t("helper.preview"))
@@ -556,6 +568,12 @@ class RecheckMainWindow(QMainWindow):
             )
             self._reset_project_view_state()
             self._load_projects(preferred_project_id=project.project_id)
+            if not self.current_project or self.current_project.project_id != project.project_id:
+                self._select_project(project.project_id)
+            if self.base_selector.count() == 0:
+                self.base_selector.setCurrentIndex(-1)
+            if self.compare_selector.count() == 0:
+                self.compare_selector.setCurrentIndex(-1)
             created_message = self._t("msg.project_created_no_snapshot", name=project.name)
             QTimer.singleShot(0, lambda msg=created_message: self.statusBar().showMessage(msg, 8000))
             return
@@ -638,6 +656,7 @@ class RecheckMainWindow(QMainWindow):
         self.latest_counts = {status: 0 for status in STATUSES}
         self.base_manifest = None
         self.compare_manifest = None
+        self.current_path_label.setText(self._t("label.path_whole"))
         self.preview_info.setText(self._t("preview.info.empty"))
         self.base_preview.show_file(None, empty_message=self._t("preview.none"), modified_time=None, size=None)
         self.compare_preview.show_file(None, empty_message=self._t("preview.none"), modified_time=None, size=None)
@@ -645,10 +664,12 @@ class RecheckMainWindow(QMainWindow):
         self._update_summary_counts(self.latest_counts)
 
     def _reset_project_view_state(self) -> None:
+        self.current_project = None
         self.snapshots = []
         self.compare_logs = []
         self.base_manifest = None
         self.compare_manifest = None
+        self.last_compare_csv_path = None
         self.base_selector.blockSignals(True)
         self.compare_selector.blockSignals(True)
         self.base_selector.clear()
@@ -809,7 +830,10 @@ class RecheckMainWindow(QMainWindow):
 
         scope_label = ", ".join(scope_folders) if scope_folders else self._t("msg.preview_scope_whole")
         self.current_path_label.setText(f"Path: {scope_label}")
-        self.statusBar().showMessage(self._t("msg.compare_done_csv", name=Path(csv_path).name))
+        self.statusBar().showMessage(
+            self._t("msg.compare_done_csv_path", name=Path(csv_path).name, path=csv_path),
+            12000,
+        )
 
     def _ask_compare_with_unsaved_state(self) -> str:
         msg = QMessageBox(self)
@@ -1258,6 +1282,11 @@ class RecheckMainWindow(QMainWindow):
         open_exports.triggered.connect(self._open_compare_exports_folder)
         menu.addAction(open_exports)
 
+        open_last_csv = QAction(self._t("project.menu.open_last_compare_csv"), self)
+        open_last_csv.setEnabled(bool(self.last_compare_csv_path))
+        open_last_csv.triggered.connect(self._open_last_compare_csv)
+        menu.addAction(open_last_csv)
+
         open_storage = QAction(self._t("project.menu.open_storage"), self)
         open_storage.triggered.connect(self._open_storage_folder)
         menu.addAction(open_storage)
@@ -1345,6 +1374,11 @@ class RecheckMainWindow(QMainWindow):
         export_dir = storage / "compare_exports"
         export_dir.mkdir(parents=True, exist_ok=True)
         self._open_path(str(export_dir))
+
+    def _open_last_compare_csv(self) -> None:
+        if not self.last_compare_csv_path:
+            return
+        self._open_path(self.last_compare_csv_path)
 
     def _save_compare_csv(
         self,

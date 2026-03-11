@@ -599,3 +599,9 @@ v0.1 では以下を保存する。
 - Project selector width is slightly widened while keeping Base/Compare selectors visually dominant.
 - Added simple in-pane video preview support (embedded when available) with clean external-open fallback when unavailable.
 - Move/rename detection remains intentionally deferred; relocation-only changes are still treated as added/removed.
+
+## v0.1 delta note (2026-03-11, polish-4)
+- New project creation path now force-resets view state (Base/Compare selectors, diff results, preview, compare-log context) and then rebinds to the created project only.
+- Post-create guidance message is clarified to explicitly prompt snapshot save before comparison.
+- Diff table default column widths are rebalanced to prioritize `kind / filename / relative path` visibility ahead of timestamp/size metadata.
+- Compare completion status now shows concrete CSV save location path, and project menu adds quick-open for the latest compare CSV.

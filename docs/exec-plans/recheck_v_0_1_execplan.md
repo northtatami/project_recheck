@@ -410,3 +410,9 @@ v0.1 MVP は以下を満たしたら完了とする。
 - Rebalanced project selector width for readability without overtaking Base/Compare selector prominence.
 - Added lightweight embedded video preview path in existing preview pane, with environment fallback to external-open guidance.
 - Kept compare status model unchanged (no move/rename detection introduced).
+
+## v0.1 delta note (2026-03-11, polish-4)
+- Hardened create-project flow to enforce clean reset before loading the created project, preventing stale Base/Compare and result carryover.
+- Updated post-create status guidance to include explicit next step (save snapshot before compare).
+- Rebalanced default diff-table column widths so core review columns remain visible first.
+- Strengthened compare CSV discoverability with save-path status message and quick-open action for latest compare CSV.
