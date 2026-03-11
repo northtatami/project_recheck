@@ -433,3 +433,13 @@ v0.1 MVP は以下を満たしたら完了とする。
 - Finalized whole-mode scope semantics by removing visible checkbox indicators entirely in whole mode.
 - Preserved selected-mode checked-state intent across mode/refresh transitions where practical.
 - Applied subtle separator margin styling in project menu to improve section readability.
+
+## v0.1 delta note (2026-03-11, polish-8)
+- Extended selected-mode scope handling to include project-root node selection.
+- Connected root-node selection to whole-project filtering semantics in compare scope evaluation.
+- Ensured whole-mode remains fully view-only with no root or child checkbox indicators visible.
+
+## v0.1 delta note (2026-03-11, polish-9)
+- Compare execution now builds and retains the full diff dataset for the current Base/Compare pair.
+- Scope mode switches and checkbox changes now re-filter the current in-memory dataset immediately without requiring another Compare execution.
+- Preview selection is refreshed against the filtered visible rows so stale preview content is cleared or replaced when the current row falls out of scope.

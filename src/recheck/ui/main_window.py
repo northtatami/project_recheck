@@ -733,11 +733,15 @@ class RecheckMainWindow(QMainWindow):
         while iterator.value():
             item = iterator.value()
             rel_path = item.data(0, Qt.ItemDataRole.UserRole)
-            if rel_path and item.checkState(0) == Qt.CheckState.Checked:
-                selected.append(str(rel_path))
+            if item.data(0, Qt.ItemDataRole.CheckStateRole) is not None and item.checkState(0) == Qt.CheckState.Checked:
+                selected.append("" if rel_path is None else str(rel_path))
             iterator += 1
 
-        unique = sorted({normalize_relpath(item) for item in selected if item.strip()})
+        normalized = {normalize_relpath(item) for item in selected}
+        if "" in normalized:
+            unique = [""]
+        else:
+            unique = sorted({item for item in normalized if item.strip()})
         self._scope_checked_paths = set(unique)
         return unique
 
@@ -748,6 +752,9 @@ class RecheckMainWindow(QMainWindow):
             return
         selected = self._selected_scope_folders()
         if selected:
+            if "" in selected:
+                self.current_path_label.setText(self._t("label.path_whole"))
+                return
             self.current_path_label.setText(f"Path: {', '.join(selected)}")
             return
         self.current_path_label.setText(f"Path: {self._t('msg.scope_selected_none')}")
@@ -758,9 +765,9 @@ class RecheckMainWindow(QMainWindow):
         while iterator.value():
             item = iterator.value()
             rel = item.data(0, Qt.ItemDataRole.UserRole)
-            if rel and item.data(0, Qt.ItemDataRole.CheckStateRole) is not None:
+            if item.data(0, Qt.ItemDataRole.CheckStateRole) is not None:
                 if item.checkState(0) == Qt.CheckState.Checked:
-                    checked.add(normalize_relpath(str(rel)))
+                    checked.add("" if rel is None else normalize_relpath(str(rel)))
             iterator += 1
         return checked
 
@@ -777,9 +784,6 @@ class RecheckMainWindow(QMainWindow):
             return
         if str(base_id) == str(compare_id):
             QMessageBox.information(self, self._t("action.compare"), self._t("msg.compare_need_distinct"))
-            return
-        if self._current_scope_mode() == "selected" and not self._selected_scope_folders():
-            QMessageBox.information(self, self._t("action.compare"), self._t("msg.scope_need_checked"))
             return
 
         if self._is_current_root_state_unsaved():
@@ -814,12 +818,10 @@ class RecheckMainWindow(QMainWindow):
         result = compare_snapshots(
             self.base_manifest,
             self.compare_manifest,
-            scope_mode=scope_mode,
-            scope_folders=scope_folders,
+            scope_mode="whole",
+            scope_folders=[],
         )
         self.diff_entries = result.entries
-        self.latest_counts = result.counts
-        self._update_summary_counts(result.counts)
         self._apply_filters_to_table()
         self._update_scope_badges(result.entries)
 
@@ -934,6 +936,30 @@ class RecheckMainWindow(QMainWindow):
         for status, button in self.summary_buttons.items():
             button.setText(f"{self._status_label(status)} {counts.get(status, 0)}")
 
+    def _count_entries(self, entries: list[DiffEntry]) -> dict[str, int]:
+        counts = {status: 0 for status in STATUSES}
+        for entry in entries:
+            counts[entry.status] = counts.get(entry.status, 0) + 1
+        return counts
+
+    def _scope_filtered_entries(self, entries: list[DiffEntry]) -> list[DiffEntry]:
+        if self._current_scope_mode() == "whole":
+            return list(entries)
+        scope_folders = self._selected_scope_folders()
+        if not scope_folders:
+            return []
+        if "" in scope_folders:
+            return list(entries)
+
+        filtered: list[DiffEntry] = []
+        for entry in entries:
+            rel = normalize_relpath(entry.relative_path)
+            for folder in scope_folders:
+                if rel == folder or rel.startswith(f"{folder}/"):
+                    filtered.append(entry)
+                    break
+        return filtered
+
     def _set_status_filter(self, status: str) -> None:
         self.current_status_filter = status
         if status == "all":
@@ -947,8 +973,17 @@ class RecheckMainWindow(QMainWindow):
         self._apply_filters_to_table()
 
     def _apply_filters_to_table(self) -> None:
+        current_key = None
+        if self.current_entry:
+            current_key = (self.current_entry.relative_path, self.current_entry.status, self.current_entry.file_name)
+
+        scope_filtered = self._scope_filtered_entries(self.diff_entries)
+        self.latest_counts = self._count_entries(scope_filtered)
+        self._update_summary_counts(self.latest_counts)
+        self._update_scope_path_label()
+
         search = self.search_box.text().strip().lower()
-        filtered = self.diff_entries
+        filtered = scope_filtered
         if self.current_status_filter != "all":
             filtered = [entry for entry in filtered if entry.status == self.current_status_filter]
         if search:
@@ -961,6 +996,7 @@ class RecheckMainWindow(QMainWindow):
         self.visible_entries = filtered
         self.diff_table.setSortingEnabled(False)
         self.diff_table.setRowCount(len(filtered))
+        selected_row = None
 
         for row, entry in enumerate(filtered):
             file_display = entry.file_name
@@ -996,10 +1032,19 @@ class RecheckMainWindow(QMainWindow):
                     item.setToolTip(entry.compare_modified_time)
                 self.diff_table.setItem(row, col, item)
             self.diff_table.setRowHeight(row, self._diff_row_height())
+            row_key = (entry.relative_path, entry.status, entry.file_name)
+            if current_key and row_key == current_key:
+                selected_row = row
         self.diff_table.setSortingEnabled(True)
 
-        if filtered:
+        if filtered and selected_row is not None:
+            self.diff_table.selectRow(selected_row)
+            self.current_entry = filtered[selected_row]
+            self._update_preview(self.current_entry)
+        elif filtered:
             self.diff_table.selectRow(0)
+            self.current_entry = filtered[0]
+            self._update_preview(self.current_entry)
         else:
             self.current_entry = None
             self._update_preview(None)
@@ -1098,7 +1143,7 @@ class RecheckMainWindow(QMainWindow):
         root_item.setData(0, Qt.ItemDataRole.UserRole, "")
         root_item.setData(0, Qt.ItemDataRole.UserRole + 1, root_path.name or str(root_path))
         root_item.setFlags(root_item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
-        root_item.setData(0, Qt.ItemDataRole.CheckStateRole, None)
+        root_item.setCheckState(0, Qt.CheckState.Checked if "" in self._scope_checked_paths else Qt.CheckState.Unchecked)
         self.scope_tree.addTopLevelItem(root_item)
 
         rel_to_item: dict[str, QTreeWidgetItem] = {"": root_item}
@@ -1161,15 +1206,21 @@ class RecheckMainWindow(QMainWindow):
             self._scope_checked_paths.update(self._capture_scope_checks())
         self._apply_scope_tree_mode_visuals()
         self._update_scope_path_label()
+        self._apply_filters_to_table()
+        if self._current_scope_mode() == "selected" and not self._selected_scope_folders() and self.diff_entries:
+            self.statusBar().showMessage(self._t("msg.scope_need_checked"), 4000)
 
     def _on_scope_item_changed(self, changed: QTreeWidgetItem, _column: int) -> None:
         if self._current_scope_mode() != "selected":
             return
         rel = changed.data(0, Qt.ItemDataRole.UserRole)
-        if not rel:
+        if rel is None:
             return
         self._scope_checked_paths = self._capture_scope_checks()
         self._update_scope_path_label()
+        self._apply_filters_to_table()
+        if not self._selected_scope_folders() and self.diff_entries:
+            self.statusBar().showMessage(self._t("msg.scope_need_checked"), 4000)
 
     def _apply_scope_tree_mode_visuals(self) -> None:
         selected_mode = self._current_scope_mode() == "selected"
@@ -1181,18 +1232,15 @@ class RecheckMainWindow(QMainWindow):
             item = iterator.value()
             rel = item.data(0, Qt.ItemDataRole.UserRole)
             flags = item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable
-            if selected_mode and rel:
+            if selected_mode and rel is not None:
                 flags |= Qt.ItemFlag.ItemIsUserCheckable
                 item.setData(
                     0,
                     Qt.ItemDataRole.CheckStateRole,
                     Qt.CheckState.Checked if normalize_relpath(str(rel)) in self._scope_checked_paths else Qt.CheckState.Unchecked,
                 )
-            elif rel:
+            elif rel is not None:
                 # Remove the checkbox indicator entirely in whole mode.
-                item.setData(0, Qt.ItemDataRole.CheckStateRole, None)
-            else:
-                # Keep project-root row view-only and checkbox-free in all modes.
                 item.setData(0, Qt.ItemDataRole.CheckStateRole, None)
             item.setFlags(flags)
             iterator += 1
@@ -1284,12 +1332,17 @@ class RecheckMainWindow(QMainWindow):
         self._set_combo_value(self.compare_selector, record.compare_snapshot_id)
         self.base_manifest = self.snapshot_store.load_manifest(self.current_project, record.base_snapshot_id)
         self.compare_manifest = self.snapshot_store.load_manifest(self.current_project, record.compare_snapshot_id)
+        self.mode_whole.blockSignals(True)
+        self.mode_selected.blockSignals(True)
+        self.mode_selected.setChecked(record.scope_mode == "selected")
+        self.mode_whole.setChecked(record.scope_mode != "selected")
+        self.mode_whole.blockSignals(False)
+        self.mode_selected.blockSignals(False)
+        self._scope_checked_paths = {normalize_relpath(path) for path in record.scope_folders}
+        self._refresh_scope_tree()
+        self._apply_scope_tree_mode_visuals()
         self.diff_entries = record.entries
-        self.latest_counts = record.counts
-        self._update_summary_counts(record.counts)
         self._apply_filters_to_table()
-        scope_label = ", ".join(record.scope_folders) if record.scope_folders else self._t("msg.preview_scope_whole")
-        self.current_path_label.setText(f"Path: {scope_label}")
 
     def _open_project_menu(self) -> None:
         if not self.current_project and self.project_selector.count() == 0:

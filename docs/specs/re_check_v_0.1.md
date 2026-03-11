@@ -625,3 +625,13 @@ v0.1 では以下を保存する。
 - In `全体` mode, scope-folder checkbox indicators are now fully hidden (not only disabled), clarifying that checks do not apply.
 - In `選択` mode, checkbox indicators reappear with prior checked selections preserved where possible.
 - Project menu separator spacing is lightly padded for calmer visual grouping without changing action scope.
+
+## v0.1 delta note (2026-03-11, polish-8)
+- In `選択` mode, the project-root node is now selectable alongside child folders.
+- Root-node selection in `選択` mode is treated as whole-project scope.
+- In `全体` mode, no checkbox indicators are shown anywhere in the scope tree, including the root node.
+
+## v0.1 delta note (2026-03-11, polish-9)
+- Compare execution now builds and retains the full diff dataset for the current Base/Compare pair.
+- Scope mode switches and checkbox changes now re-filter the current dataset immediately without requiring another Compare execution.
+- Preview selection is refreshed against the filtered visible result set so stale preview content is not left behind.
