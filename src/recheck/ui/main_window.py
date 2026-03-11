@@ -1039,7 +1039,12 @@ class RecheckMainWindow(QMainWindow):
         name, ok = QInputDialog.getText(self, self._t("dialog.snapshot.title"), self._t("dialog.snapshot.label"), text=default_name)
         if not ok:
             return
-        self._start_snapshot_save(name=name, source_folder=None, set_compare=True)
+        self._start_snapshot_save(
+            name=name,
+            source_folder=None,
+            set_compare=True,
+            set_base=len(self.snapshots) == 0,
+        )
 
     def _import_external_folder_as_snapshot(self) -> None:
         if not self.current_project:
@@ -1053,7 +1058,12 @@ class RecheckMainWindow(QMainWindow):
             return
         folder_name = Path(picked).name or "external"
         snapshot_name = f"external_{folder_name}"
-        self._start_snapshot_save(name=snapshot_name, source_folder=picked, set_compare=True)
+        self._start_snapshot_save(
+            name=snapshot_name,
+            source_folder=picked,
+            set_compare=True,
+            set_base=len(self.snapshots) == 0,
+        )
 
     def _task_save_snapshot(self, project_id: str, name: str, source_folder: str | None) -> dict[str, object]:
         project = self.project_store.load_project(project_id)
@@ -1108,11 +1118,17 @@ class RecheckMainWindow(QMainWindow):
         snapshot = bundle.get("snapshot")
         if not isinstance(snapshot, SnapshotRecord):
             return
+        previous_base_id = self.base_selector.currentData()
+        had_snapshots_before = len(self.snapshots) > 0
         snapshots = bundle.get("snapshots", [])
         if isinstance(snapshots, list):
             self._apply_snapshot_records([item for item in snapshots if isinstance(item, SnapshotRecord)])
         if set_base:
             self._set_combo_value(self.base_selector, snapshot.snapshot_id)
+        elif not had_snapshots_before:
+            self._set_combo_value(self.base_selector, snapshot.snapshot_id)
+        elif previous_base_id:
+            self._set_combo_value(self.base_selector, str(previous_base_id))
         if set_compare:
             self._set_combo_value(self.compare_selector, snapshot.snapshot_id)
 
