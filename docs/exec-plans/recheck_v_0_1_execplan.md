@@ -423,3 +423,8 @@ v0.1 MVP は以下を満たしたら完了とする。
 - Scope tree refresh keeps checked-folder intent when folders still exist, while incorporating newly added folders.
 - Timestamp presentation is converted to JST for practical JP-facing UI/CSV readability without changing stored source timestamps.
 - Default splitter balance shifts width from Scope to Diff Results, and settings menu includes a simple layout reset action.
+
+## v0.1 delta note (2026-03-11, polish-6)
+- Added lightweight separators in project menu for clearer action grouping.
+- Enforced scope-visual semantics by mode: whole mode hides tree checkboxes; selected mode shows checkboxes for filtering.
+- Added mode-coupled scope path label updates to reduce ambiguity of active compare scope.

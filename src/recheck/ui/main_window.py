@@ -504,7 +504,7 @@ class RecheckMainWindow(QMainWindow):
 
         self.diff_title.setText(self._t("label.diff_results"))
         self.diff_helper.setText(self._t("helper.diff"))
-        self.current_path_label.setText(self._t("label.path_whole"))
+        self._update_scope_path_label()
         self.search_box.setPlaceholderText(self._t("search.placeholder"))
         self.diff_table.setHorizontalHeaderLabels(
             [
@@ -738,6 +738,17 @@ class RecheckMainWindow(QMainWindow):
         unique = sorted({normalize_relpath(item) for item in selected if item.strip()})
         return unique
 
+    def _update_scope_path_label(self) -> None:
+        mode = self._current_scope_mode()
+        if mode == "whole":
+            self.current_path_label.setText(self._t("label.path_whole"))
+            return
+        selected = self._selected_scope_folders()
+        if selected:
+            self.current_path_label.setText(f"Path: {', '.join(selected)}")
+            return
+        self.current_path_label.setText(f"Path: {self._t('msg.scope_selected_none')}")
+
     def _execute_compare(self) -> None:
         if not self.current_project:
             return
@@ -820,8 +831,7 @@ class RecheckMainWindow(QMainWindow):
         self.current_project.last_compare_snapshot_id = compare_id
         self.project_store.save_project(self.current_project)
 
-        scope_label = ", ".join(scope_folders) if scope_folders else self._t("msg.preview_scope_whole")
-        self.current_path_label.setText(f"Path: {scope_label}")
+        self._update_scope_path_label()
         self.statusBar().showMessage(
             self._t("msg.compare_done_csv_path", name=Path(csv_path).name, path=csv_path),
             12000,
@@ -1077,7 +1087,7 @@ class RecheckMainWindow(QMainWindow):
         root_item = QTreeWidgetItem([root_path.name or str(root_path)])
         root_item.setData(0, Qt.ItemDataRole.UserRole, "")
         root_item.setData(0, Qt.ItemDataRole.UserRole + 1, root_path.name or str(root_path))
-        root_item.setFlags(root_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        root_item.setFlags(root_item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
         root_item.setCheckState(0, Qt.CheckState.Unchecked)
         self.scope_tree.addTopLevelItem(root_item)
 
@@ -1090,7 +1100,6 @@ class RecheckMainWindow(QMainWindow):
                     parent_rel = ""
                 parent_item = rel_to_item.get(parent_rel, root_item)
                 item = QTreeWidgetItem([directory.name])
-                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 item.setCheckState(0, Qt.CheckState.Checked if rel in checked_paths else Qt.CheckState.Unchecked)
                 item.setData(0, Qt.ItemDataRole.UserRole, rel)
                 item.setData(0, Qt.ItemDataRole.UserRole + 1, directory.name)
@@ -1098,6 +1107,7 @@ class RecheckMainWindow(QMainWindow):
                 rel_to_item[rel] = item
 
         self.scope_tree.expandToDepth(1)
+        self._apply_scope_tree_mode_visuals()
         self.scope_tree.blockSignals(False)
 
     def _update_scope_badges(self, entries: list[DiffEntry]) -> None:
@@ -1137,10 +1147,33 @@ class RecheckMainWindow(QMainWindow):
             iterator += 1
 
     def _on_scope_mode_changed(self) -> None:
-        return
+        self._apply_scope_tree_mode_visuals()
+        self._update_scope_path_label()
 
     def _on_scope_item_changed(self, changed: QTreeWidgetItem, _column: int) -> None:
-        return
+        if self._current_scope_mode() != "selected":
+            return
+        rel = changed.data(0, Qt.ItemDataRole.UserRole)
+        if not rel:
+            return
+        self._update_scope_path_label()
+
+    def _apply_scope_tree_mode_visuals(self) -> None:
+        selected_mode = self._current_scope_mode() == "selected"
+        was_blocked = self.scope_tree.signalsBlocked()
+        if not was_blocked:
+            self.scope_tree.blockSignals(True)
+        iterator = QTreeWidgetItemIterator(self.scope_tree)
+        while iterator.value():
+            item = iterator.value()
+            rel = item.data(0, Qt.ItemDataRole.UserRole)
+            flags = item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable
+            if selected_mode and rel:
+                flags |= Qt.ItemFlag.ItemIsUserCheckable
+            item.setFlags(flags)
+            iterator += 1
+        if not was_blocked:
+            self.scope_tree.blockSignals(False)
 
     def _checked_scope_items(self) -> list[QTreeWidgetItem]:
         checked: list[QTreeWidgetItem] = []
@@ -1244,13 +1277,15 @@ class RecheckMainWindow(QMainWindow):
         create_action.triggered.connect(lambda: self._create_project_with_dialog(initial=False))
         menu.addAction(create_action)
 
-        settings_action = QAction(self._t("project.menu.settings"), self)
-        settings_action.triggered.connect(self._edit_project_settings)
-        menu.addAction(settings_action)
-
         rename_action = QAction(self._t("project.menu.rename"), self)
         rename_action.triggered.connect(self._rename_project)
         menu.addAction(rename_action)
+
+        menu.addSeparator()
+
+        settings_action = QAction(self._t("project.menu.settings"), self)
+        settings_action.triggered.connect(self._edit_project_settings)
+        menu.addAction(settings_action)
 
         root_action = QAction(self._t("project.menu.change_root"), self)
         root_action.triggered.connect(self._change_root_folder)
@@ -1264,6 +1299,8 @@ class RecheckMainWindow(QMainWindow):
         import_action.triggered.connect(self._import_external_folder_as_snapshot)
         menu.addAction(import_action)
 
+        menu.addSeparator()
+
         open_exports = QAction(self._t("project.menu.open_compare_exports"), self)
         open_exports.triggered.connect(self._open_compare_exports_folder)
         menu.addAction(open_exports)
@@ -1276,6 +1313,8 @@ class RecheckMainWindow(QMainWindow):
         open_storage = QAction(self._t("project.menu.open_storage"), self)
         open_storage.triggered.connect(self._open_storage_folder)
         menu.addAction(open_storage)
+
+        menu.addSeparator()
 
         export_action = QAction(self._t("project.menu.export"), self)
         export_action.triggered.connect(self._export_project)

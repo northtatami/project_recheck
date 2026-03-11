@@ -613,3 +613,10 @@ v0.1 では以下を保存する。
 - Scope tree refresh now preserves checked-folder selections where possible while syncing with latest project folders.
 - UI-visible timestamps are normalized for Japanese practical use (JST display) while persistence format remains unchanged.
 - Default pane balance is adjusted to give more width to Diff Results, and a lightweight layout reset action is available from settings menu.
+
+## v0.1 delta note (2026-03-11, polish-6)
+- Project `...` menu now includes simple separators to improve scanability between action groups.
+- Scope tree interaction now visually matches mode semantics:
+  - `全体`: tree visible but checkboxes hidden (view-only)
+  - `選択`: checkboxes shown and used for filtering
+- Scope path label now updates by mode (`whole` / selected folders / no-folder-selected state).
