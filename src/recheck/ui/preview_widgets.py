@@ -33,6 +33,14 @@ try:
 except Exception:
     HAS_QT_PDF = False
 
+try:
+    from PySide6.QtMultimediaWidgets import QVideoWidget
+
+    HAS_QT_VIDEO_WIDGET = True
+except Exception:
+    QVideoWidget = None
+    HAS_QT_VIDEO_WIDGET = False
+
 
 def _format_bytes(size: int | None) -> str:
     if size is None:
@@ -105,6 +113,25 @@ def build_waveform_samples(path: str, bins: int = 220) -> list[float]:
         return [0.0] * bins
     rough = [abs(byte - 128) / 128.0 for byte in payload]
     return _downsample(rough, bins)
+
+
+def _media_source_with_hint(source_path: str, hint_path: str | None, alias_dir: Path) -> str:
+    source = Path(source_path)
+    if source.suffix:
+        return str(source)
+    hint_suffix = Path(hint_path or "").suffix.lower()
+    if not hint_suffix:
+        return str(source)
+    try:
+        alias_dir.mkdir(parents=True, exist_ok=True)
+        stat = source.stat()
+        digest = hashlib.sha1(f"{source}:{stat.st_size}:{stat.st_mtime_ns}:{hint_suffix}".encode("utf-8")).hexdigest()
+        alias_path = alias_dir / f"{digest}{hint_suffix}"
+        if not alias_path.exists():
+            shutil.copy2(source, alias_path)
+        return str(alias_path)
+    except Exception:
+        return str(source)
 
 
 class AudioWaveformWidget(QWidget):
@@ -258,26 +285,9 @@ class AudioPreviewWidget(QWidget):
         self.waveform.set_samples([0.0] * 220)
         self.waveform.set_position_ratio(0.0)
 
-    def _media_source_with_hint(self, source_path: str, hint_path: str | None) -> str:
-        source = Path(source_path)
-        if source.suffix:
-            return str(source)
-        hint_suffix = Path(hint_path or "").suffix.lower()
-        if not hint_suffix:
-            return str(source)
-        try:
-            stat = source.stat()
-            digest = hashlib.sha1(f"{source}:{stat.st_size}:{stat.st_mtime_ns}:{hint_suffix}".encode("utf-8")).hexdigest()
-            alias_path = self._media_alias_dir / f"{digest}{hint_suffix}"
-            if not alias_path.exists():
-                shutil.copy2(source, alias_path)
-            return str(alias_path)
-        except Exception:
-            return str(source)
-
     def set_file(self, path: str, *, source_hint_path: str | None = None) -> None:
         self.clear()
-        media_source = self._media_source_with_hint(path, source_hint_path)
+        media_source = _media_source_with_hint(path, source_hint_path, self._media_alias_dir)
         self.waveform.set_samples(build_waveform_samples(media_source))
         self.player.setSource(QUrl.fromLocalFile(media_source))
 
@@ -305,6 +315,101 @@ class AudioPreviewWidget(QWidget):
         self.player.setPosition(int(duration * ratio))
 
     def _toggle_play_pause(self) -> None:
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player.pause()
+            self.play_button.setText(self._tr("audio.play"))
+            return
+        self.player.play()
+        self.play_button.setText(self._tr("audio.pause"))
+
+
+class VideoPreviewWidget(QWidget):
+    def __init__(self, parent: QWidget | None = None, *, tr=None) -> None:
+        super().__init__(parent)
+        self._tr = tr or (lambda key, **kwargs: key)
+        self._updating_slider = False
+        self._media_alias_dir = Path(tempfile.gettempdir()) / "recheck_preview_media"
+
+        self.player = QMediaPlayer(self)
+        self.audio_output = QAudioOutput(self)
+        self.player.setAudioOutput(self.audio_output)
+
+        layout = QVBoxLayout(self)
+
+        self.video_widget = QVideoWidget() if HAS_QT_VIDEO_WIDGET else None
+        self.video_fallback_label = QLabel(self._tr("preview.video_unavailable"))
+        self.video_fallback_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.video_fallback_label.setWordWrap(True)
+
+        if self.video_widget is not None:
+            self.player.setVideoOutput(self.video_widget)
+            layout.addWidget(self.video_widget, 1)
+            self.video_fallback_label.hide()
+        else:
+            layout.addWidget(self.video_fallback_label, 1)
+
+        controls = QHBoxLayout()
+        self.play_button = QPushButton(self._tr("audio.play"))
+        self.play_button.clicked.connect(self._toggle_play_pause)
+        controls.addWidget(self.play_button)
+        self.time_label = QLabel("0:00:00 / 0:00:00")
+        controls.addWidget(self.time_label)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider.setRange(0, 0)
+        self.slider.sliderMoved.connect(self._seek)
+        layout.addWidget(self.slider)
+
+        self.player.durationChanged.connect(self._on_duration_changed)
+        self.player.positionChanged.connect(self._on_position_changed)
+
+    def is_supported(self) -> bool:
+        return self.video_widget is not None
+
+    def retranslate(self, tr) -> None:
+        self._tr = tr
+        self.video_fallback_label.setText(self._tr("preview.video_unavailable"))
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.play_button.setText(self._tr("audio.pause"))
+        else:
+            self.play_button.setText(self._tr("audio.play"))
+
+    def clear(self) -> None:
+        self.player.stop()
+        self.player.setSource(QUrl())
+        self.slider.setRange(0, 0)
+        self.slider.setValue(0)
+        self.play_button.setText(self._tr("audio.play"))
+        self.time_label.setText("0:00:00 / 0:00:00")
+
+    def set_file(self, path: str, *, source_hint_path: str | None = None) -> bool:
+        self.clear()
+        if not self.is_supported():
+            return False
+        media_source = _media_source_with_hint(path, source_hint_path, self._media_alias_dir)
+        self.player.setSource(QUrl.fromLocalFile(media_source))
+        return True
+
+    def _on_duration_changed(self, duration: int) -> None:
+        self.slider.setRange(0, max(0, duration))
+        self.time_label.setText(f"{_format_ms(self.player.position())} / {_format_ms(duration)}")
+
+    def _on_position_changed(self, position: int) -> None:
+        self._updating_slider = True
+        self.slider.setValue(position)
+        self._updating_slider = False
+        self.time_label.setText(f"{_format_ms(position)} / {_format_ms(self.player.duration())}")
+
+    def _seek(self, value: int) -> None:
+        if self._updating_slider:
+            return
+        self.player.setPosition(value)
+
+    def _toggle_play_pause(self) -> None:
+        if not self.is_supported():
+            return
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
             self.play_button.setText(self._tr("audio.play"))
@@ -357,6 +462,9 @@ class FilePreviewColumn(QFrame):
         self.audio_widget = AudioPreviewWidget(tr=self._tr)
         self.stack.addWidget(self.audio_widget)
 
+        self.video_widget = VideoPreviewWidget(tr=self._tr)
+        self.stack.addWidget(self.video_widget)
+
         self.unsupported_label = QLabel(self._tr("preview.unsupported"))
         self.unsupported_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.unsupported_label.setWordWrap(True)
@@ -376,7 +484,8 @@ class FilePreviewColumn(QFrame):
         self._page_text = 2
         self._page_pdf = 3
         self._page_audio = 4
-        self._page_unsupported = 5
+        self._page_video = 5
+        self._page_unsupported = 6
         self._show_none(self._tr("preview.none"))
 
     def retranslate(self, tr, *, title: str) -> None:
@@ -385,12 +494,14 @@ class FilePreviewColumn(QFrame):
         self.title_label.setText(title)
         self.open_button.setText(tr("preview.open_external"))
         self.audio_widget.retranslate(tr)
+        self.video_widget.retranslate(tr)
         if self.current_path is None:
             self.info_label.setText(tr("preview.no_file_selected"))
             self.meta_label.setText(tr("preview.size_modified_empty"))
 
     def stop_media(self) -> None:
         self.audio_widget.clear()
+        self.video_widget.clear()
 
     def _show_none(self, message: str) -> None:
         self.stop_media()
@@ -466,10 +577,17 @@ class FilePreviewColumn(QFrame):
             self.stack.setCurrentIndex(self._page_audio)
             return
 
-        self.stop_media()
         if preview_type == "video":
-            self.unsupported_label.setText(self._tr("preview.video_optional"))
-        elif preview_type == "office":
+            self.stop_media()
+            if self.video_widget.set_file(str(file_path), source_hint_path=type_hint_path):
+                self.stack.setCurrentIndex(self._page_video)
+            else:
+                self.unsupported_label.setText(self._tr("preview.video_unavailable"))
+                self.stack.setCurrentIndex(self._page_unsupported)
+            return
+
+        self.stop_media()
+        if preview_type == "office":
             self.unsupported_label.setText(self._tr("preview.office_external"))
         else:
             self.unsupported_label.setText(self._tr("preview.unsupported"))

@@ -402,3 +402,11 @@ v0.1 MVP は以下を満たしたら完了とする。
 - Added project-menu action to open compare CSV export folder quickly.
 - Added lightweight productivity shortcuts (`Ctrl+Enter`, `Ctrl+S`, `Ctrl+H`, `Ctrl+F`, `Esc`).
 - Added subtle scope tree cues for changed folders (added/modified) while preserving calm UI.
+
+## v0.1 delta note (2026-03-11, polish-3)
+- Added snapshot-action scope-tree refresh hook so project folder structure updates are reflected after `Save Snapshot` and `Save and Compare`.
+- Applied compact two-line Base/Compare timestamp/size headers in diff table for faster scanning.
+- Tuned Base/Compare relation hint alignment to sit with selector row context.
+- Rebalanced project selector width for readability without overtaking Base/Compare selector prominence.
+- Added lightweight embedded video preview path in existing preview pane, with environment fallback to external-open guidance.
+- Kept compare status model unchanged (no move/rename detection introduced).

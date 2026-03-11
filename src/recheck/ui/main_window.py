@@ -204,7 +204,8 @@ class RecheckMainWindow(QMainWindow):
         self.project_selector = QComboBox()
         self.project_selector.currentIndexChanged.connect(self._on_project_changed)
         self.project_selector.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        self.project_selector.setMaximumWidth(420)
+        self.project_selector.setMinimumWidth(340)
+        self.project_selector.setMaximumWidth(520)
         row2.addWidget(self.project_selector)
 
         self.project_menu_button = QPushButton("...")
@@ -225,8 +226,8 @@ class RecheckMainWindow(QMainWindow):
 
         self.base_compare_hint = QLabel()
         self.base_compare_hint.setObjectName("flowHint")
-        self.base_compare_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        row3.addWidget(self.base_compare_hint, 0, 1, 2, 1)
+        self.base_compare_hint.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom)
+        row3.addWidget(self.base_compare_hint, 1, 1)
 
         self.compare_label = QLabel()
         row3.addWidget(self.compare_label, 0, 2)
@@ -334,6 +335,8 @@ class RecheckMainWindow(QMainWindow):
         self.diff_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.diff_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.diff_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.diff_table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.diff_table.horizontalHeader().setFixedHeight(44)
         self.diff_table.setSortingEnabled(True)
         self.diff_table.itemSelectionChanged.connect(self._on_diff_selection_changed)
         layout.addWidget(self.diff_table, 1)
@@ -421,7 +424,7 @@ class RecheckMainWindow(QMainWindow):
             QLabel#appSubtitleInline {{ color: #5f7387; padding-top: 2px; }}
             QLabel#paneTitle {{ font-size: {pane_title_size}px; font-weight: 700; color: #20455f; }}
             QLabel#paneHelp {{ color: #607487; }}
-            QLabel#flowHint {{ color: #70879b; padding-left: 4px; padding-right: 4px; }}
+            QLabel#flowHint {{ color: #70879b; padding-left: 4px; padding-right: 4px; padding-bottom: 2px; }}
             QLabel#historyTitle {{ font-size: {base_size + 3}px; font-weight: 700; }}
             QLabel#previewCollapsedHint {{
                 color: #5f7387;
@@ -498,10 +501,10 @@ class RecheckMainWindow(QMainWindow):
                 self._t("table.type"),
                 self._t("table.file_name"),
                 self._t("table.relative_path"),
-                self._t("table.base_modified"),
-                self._t("table.compare_modified"),
-                self._t("table.base_size"),
-                self._t("table.compare_size"),
+                self._t("table.base_modified_multiline"),
+                self._t("table.compare_modified_multiline"),
+                self._t("table.base_size_multiline"),
+                self._t("table.compare_size_multiline"),
             ]
         )
 
@@ -666,6 +669,7 @@ class RecheckMainWindow(QMainWindow):
         if not ok:
             return
         snapshot = self.snapshot_store.save_snapshot(self.current_project, settings=self.settings, name=name)
+        self._refresh_scope_tree()
         self._refresh_snapshots()
         self._set_combo_value(self.compare_selector, snapshot.snapshot_id)
         self.statusBar().showMessage(self._t("msg.snapshot_saved", name=snapshot.name))
@@ -751,6 +755,7 @@ class RecheckMainWindow(QMainWindow):
                     name=f"compare_{self.current_project.name}",
                     source_folder=self.current_project.root_folder,
                 )
+                self._refresh_scope_tree()
                 self._refresh_snapshots()
                 self._set_combo_value(self.base_selector, selected_base_id)
                 self._set_combo_value(self.compare_selector, snapshot.snapshot_id)

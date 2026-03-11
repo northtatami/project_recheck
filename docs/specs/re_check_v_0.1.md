@@ -591,3 +591,11 @@ v0.1 では以下を保存する。
 - Project menu includes quick access to open the compare CSV export folder.
 - Lightweight shortcuts are standardized: `Ctrl+Enter`, `Ctrl+S`, `Ctrl+H`, `Ctrl+F`, `Esc`, `Ctrl+0`, `Ctrl+=`, `Ctrl+-`.
 - Scope tree adds subtle added/modified folder cues without changing the 3-pane interaction model.
+
+## v0.1 delta note (2026-03-11, polish-3)
+- Scope tree now refreshes from current project root after snapshot save and after `Save and Compare`, in addition to project load/switch refresh.
+- Diff table Base/Compare modified/size headers now use compact two-line labels for readability.
+- Base/Compare directional hint placement is aligned to selector row relation instead of floating mid-block.
+- Project selector width is slightly widened while keeping Base/Compare selectors visually dominant.
+- Added simple in-pane video preview support (embedded when available) with clean external-open fallback when unavailable.
+- Move/rename detection remains intentionally deferred; relocation-only changes are still treated as added/removed.
