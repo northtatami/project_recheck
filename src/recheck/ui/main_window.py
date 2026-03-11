@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import csv
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from PySide6.QtCore import QTimer, Qt
@@ -55,6 +55,7 @@ from recheck.utils.open_external import open_external
 from recheck.utils.path_utils import normalize_relpath, safe_slug
 
 STATUSES = ("added", "removed", "modified", "unchanged")
+JST = timezone(timedelta(hours=9))
 
 
 class RecheckMainWindow(QMainWindow):
@@ -84,7 +85,7 @@ class RecheckMainWindow(QMainWindow):
         self.preview_panel: QFrame | None = None
         self.preview_content: QWidget | None = None
         self.preview_collapsed_hint: QLabel | None = None
-        self._last_splitter_sizes = [290, 530, 560]
+        self._last_splitter_sizes = self._default_splitter_sizes()
         self.last_compare_csv_path: str | None = None
         self._shortcuts: list[QShortcut] = []
 
@@ -139,6 +140,9 @@ class RecheckMainWindow(QMainWindow):
         self._setup_shortcuts()
         self.statusBar().showMessage(self._t("msg.ready"))
         self._apply_preview_pane_visibility(self.settings.preview_pane_visible, persist=False, notify=False)
+
+    def _default_splitter_sizes(self) -> list[int]:
+        return [250, 640, 520]
 
     def _setup_shortcuts(self) -> None:
         bindings: list[tuple[str, callable]] = [
@@ -265,17 +269,13 @@ class RecheckMainWindow(QMainWindow):
         self.mode_group = QButtonGroup(self)
         self.mode_whole = QRadioButton()
         self.mode_selected = QRadioButton()
-        self.mode_multiple = QRadioButton()
         self.mode_whole.setChecked(True)
         self.mode_group.addButton(self.mode_whole)
         self.mode_group.addButton(self.mode_selected)
-        self.mode_group.addButton(self.mode_multiple)
         self.mode_whole.toggled.connect(self._on_scope_mode_changed)
         self.mode_selected.toggled.connect(self._on_scope_mode_changed)
-        self.mode_multiple.toggled.connect(self._on_scope_mode_changed)
         mode_row.addWidget(self.mode_whole)
         mode_row.addWidget(self.mode_selected)
-        mode_row.addWidget(self.mode_multiple)
         mode_row.addStretch(1)
         layout.addLayout(mode_row)
 
@@ -500,7 +500,6 @@ class RecheckMainWindow(QMainWindow):
         self.scope_helper.setText(self._t("helper.scope"))
         self.mode_whole.setText(self._t("scope.whole"))
         self.mode_selected.setText(self._t("scope.selected"))
-        self.mode_multiple.setText(self._t("scope.multiple"))
         self.scope_tree.setHeaderLabels([self._t("label.scope")])
 
         self.diff_title.setText(self._t("label.diff_results"))
@@ -720,8 +719,6 @@ class RecheckMainWindow(QMainWindow):
     def _current_scope_mode(self) -> str:
         if self.mode_selected.isChecked():
             return "selected"
-        if self.mode_multiple.isChecked():
-            return "multiple"
         return "whole"
 
     def _selected_scope_folders(self) -> list[str]:
@@ -738,16 +735,8 @@ class RecheckMainWindow(QMainWindow):
                 selected.append(str(rel_path))
             iterator += 1
 
-        if mode == "selected":
-            if selected:
-                return [selected[0]]
-            current = self.scope_tree.currentItem()
-            if current:
-                rel_path = current.data(0, Qt.ItemDataRole.UserRole)
-                if rel_path:
-                    return [str(rel_path)]
-            return []
-        return selected
+        unique = sorted({normalize_relpath(item) for item in selected if item.strip()})
+        return unique
 
     def _execute_compare(self) -> None:
         if not self.current_project:
@@ -762,6 +751,9 @@ class RecheckMainWindow(QMainWindow):
             return
         if str(base_id) == str(compare_id):
             QMessageBox.information(self, self._t("action.compare"), self._t("msg.compare_need_distinct"))
+            return
+        if self._current_scope_mode() == "selected" and not self._selected_scope_folders():
+            QMessageBox.information(self, self._t("action.compare"), self._t("msg.scope_need_checked"))
             return
 
         if self._is_current_root_state_unsaved():
@@ -888,6 +880,8 @@ class RecheckMainWindow(QMainWindow):
             return "-"
         try:
             dt = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(JST)
             return dt.strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             if "T" in normalized:
@@ -1064,6 +1058,15 @@ class RecheckMainWindow(QMainWindow):
         open_external(str(target))
 
     def _refresh_scope_tree(self) -> None:
+        checked_paths: set[str] = set()
+        iterator = QTreeWidgetItemIterator(self.scope_tree)
+        while iterator.value():
+            item = iterator.value()
+            rel = item.data(0, Qt.ItemDataRole.UserRole)
+            if rel and item.checkState(0) == Qt.CheckState.Checked:
+                checked_paths.add(str(rel))
+            iterator += 1
+
         self.scope_tree.blockSignals(True)
         self.scope_tree.clear()
         if not self.current_project:
@@ -1088,7 +1091,7 @@ class RecheckMainWindow(QMainWindow):
                 parent_item = rel_to_item.get(parent_rel, root_item)
                 item = QTreeWidgetItem([directory.name])
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                item.setCheckState(0, Qt.CheckState.Unchecked)
+                item.setCheckState(0, Qt.CheckState.Checked if rel in checked_paths else Qt.CheckState.Unchecked)
                 item.setData(0, Qt.ItemDataRole.UserRole, rel)
                 item.setData(0, Qt.ItemDataRole.UserRole + 1, directory.name)
                 parent_item.addChild(item)
@@ -1134,28 +1137,10 @@ class RecheckMainWindow(QMainWindow):
             iterator += 1
 
     def _on_scope_mode_changed(self) -> None:
-        if not self.mode_selected.isChecked():
-            return
-        checked_items = self._checked_scope_items()
-        if len(checked_items) <= 1:
-            return
-        first = checked_items[0]
-        self.scope_tree.blockSignals(True)
-        for item in checked_items[1:]:
-            item.setCheckState(0, Qt.CheckState.Unchecked)
-        first.setCheckState(0, Qt.CheckState.Checked)
-        self.scope_tree.blockSignals(False)
+        return
 
     def _on_scope_item_changed(self, changed: QTreeWidgetItem, _column: int) -> None:
-        if not self.mode_selected.isChecked():
-            return
-        if changed.checkState(0) != Qt.CheckState.Checked:
-            return
-        self.scope_tree.blockSignals(True)
-        for item in self._checked_scope_items():
-            if item is not changed:
-                item.setCheckState(0, Qt.CheckState.Unchecked)
-        self.scope_tree.blockSignals(False)
+        return
 
     def _checked_scope_items(self) -> list[QTreeWidgetItem]:
         checked: list[QTreeWidgetItem] = []
@@ -1191,7 +1176,7 @@ class RecheckMainWindow(QMainWindow):
             if len(self._last_splitter_sizes) == 3 and self._last_splitter_sizes[2] > 0:
                 self.main_splitter.setSizes(self._last_splitter_sizes)
             else:
-                self.main_splitter.setSizes([290, 530, 560])
+                self.main_splitter.setSizes(self._default_splitter_sizes())
             if notify:
                 self.statusBar().showMessage(self._t("msg.preview_shown"))
         else:
@@ -1202,9 +1187,10 @@ class RecheckMainWindow(QMainWindow):
             self.preview_panel.setMinimumWidth(collapsed_width)
             self.preview_panel.setMaximumWidth(collapsed_width)
 
-            left = sizes[0] if len(sizes) > 0 else 290
-            center = sizes[1] if len(sizes) > 1 else 530
-            total = sum(sizes) if sizes else (290 + 530 + 560)
+            defaults = self._default_splitter_sizes()
+            left = sizes[0] if len(sizes) > 0 else defaults[0]
+            center = sizes[1] if len(sizes) > 1 else defaults[1]
+            total = sum(sizes) if sizes else sum(defaults)
             remaining = max(220, total - collapsed_width)
             left_ratio = left / max(1, left + center)
             left_new = int(remaining * left_ratio)
@@ -1444,10 +1430,22 @@ class RecheckMainWindow(QMainWindow):
         app_action.triggered.connect(self._open_settings_dialog)
         menu.addAction(app_action)
 
+        reset_layout_action = QAction(self._t("settings.reset_layout"), self)
+        reset_layout_action.triggered.connect(self._reset_layout_defaults)
+        menu.addAction(reset_layout_action)
+
         version_action = QAction(self._t("settings.version"), self)
         version_action.triggered.connect(lambda: QMessageBox.information(self, self._t("settings.version"), f"Re:Check {__version__}"))
         menu.addAction(version_action)
         menu.exec(self.settings_button.mapToGlobal(self.settings_button.rect().bottomLeft()))
+
+    def _reset_layout_defaults(self) -> None:
+        if self.main_splitter is None:
+            return
+        self._last_splitter_sizes = self._default_splitter_sizes()
+        self._apply_preview_pane_visibility(True, persist=True, notify=False)
+        self.main_splitter.setSizes(self._last_splitter_sizes)
+        self.statusBar().showMessage(self._t("msg.layout_reset"), 5000)
 
     def _open_settings_dialog(self) -> None:
         draft = copy.deepcopy(self.settings)

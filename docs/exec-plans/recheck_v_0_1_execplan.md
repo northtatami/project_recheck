@@ -416,3 +416,10 @@ v0.1 MVP は以下を満たしたら完了とする。
 - Updated post-create status guidance to include explicit next step (save snapshot before compare).
 - Rebalanced default diff-table column widths so core review columns remain visible first.
 - Strengthened compare CSV discoverability with save-path status message and quick-open action for latest compare CSV.
+
+## v0.1 delta note (2026-03-11, polish-5)
+- Scope control is consolidated to `whole` vs `selected` only; selected mode now supports multi-folder checks directly.
+- Compare filtering now strictly respects checked scope folders in selected mode and no longer degrades to whole-project output when none are checked.
+- Scope tree refresh keeps checked-folder intent when folders still exist, while incorporating newly added folders.
+- Timestamp presentation is converted to JST for practical JP-facing UI/CSV readability without changing stored source timestamps.
+- Default splitter balance shifts width from Scope to Diff Results, and settings menu includes a simple layout reset action.

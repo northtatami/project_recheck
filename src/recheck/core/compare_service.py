@@ -16,12 +16,12 @@ class CompareResult:
 
 
 def _in_scope(relative_path: str, mode: str, scope_folders: list[str]) -> bool:
-    if mode == "whole" or not scope_folders:
+    if mode == "whole":
         return True
     normalized_path = normalize_relpath(relative_path)
     normalized_scopes = [normalize_relpath(item) for item in scope_folders if item.strip()]
-    if mode == "selected" and normalized_scopes:
-        normalized_scopes = normalized_scopes[:1]
+    if mode == "selected" and not normalized_scopes:
+        return False
     for folder in normalized_scopes:
         if normalized_path == folder or normalized_path.startswith(f"{folder}/"):
             return True

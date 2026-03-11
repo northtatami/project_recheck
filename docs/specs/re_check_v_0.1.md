@@ -605,3 +605,11 @@ v0.1 では以下を保存する。
 - Post-create guidance message is clarified to explicitly prompt snapshot save before comparison.
 - Diff table default column widths are rebalanced to prioritize `kind / filename / relative path` visibility ahead of timestamp/size metadata.
 - Compare completion status now shows concrete CSV save location path, and project menu adds quick-open for the latest compare CSV.
+
+## v0.1 delta note (2026-03-11, polish-5)
+- Scope mode is simplified to two states only: `全体` and `選択`.
+- In `選択` mode, one or more checked scope folders are now all applied to compare filtering (no separate multi-mode).
+- Selected-scope compare is now strict: when no folder is checked, compare is blocked with guidance instead of falling back to whole-project scope.
+- Scope tree refresh now preserves checked-folder selections where possible while syncing with latest project folders.
+- UI-visible timestamps are normalized for Japanese practical use (JST display) while persistence format remains unchanged.
+- Default pane balance is adjusted to give more width to Diff Results, and a lightweight layout reset action is available from settings menu.
