@@ -1,91 +1,142 @@
-# Re:Check v0.1 MVP
+# Re:Check v0.1
 
-Re:Check is a local Windows GUI tool for reviewing folder diffs with scope selection, side-by-side previews, and saved history.
+Re:Check は、**プロジェクト単位のスナップショット**を使ってフォルダ差分を確認する、**Windows向けローカルGUIツール**です。
 
-## Run
+主に、前回の納品・版（`Base`）と、新しい／現在の版（`Compare`）を比較したいユーザー向けで、以下の用途を想定しています。
 
-1. Install dependencies:
-   - `python -m pip install -r requirements.txt`
-2. Run the app:
-   - PowerShell: `$env:PYTHONPATH="src"; python -m recheck`
+- スコープで比較範囲を絞る
+- 差分一覧を確認する
+- 前回 / 今回を並べてプレビューする
+- 比較履歴や CSV 出力を保存する
 
-## Implemented v0.1 scope
+## 想定ユーザー
 
-- Project create/save/load/switch
-- Initial setup dialog
-- Snapshot save and Base/Compare snapshot selection
-- Scope pane:
-  - Whole
-  - Selected folder
-  - Multiple folders
-- Diff Results pane:
-  - Added/Removed/Modified/Unchanged summary cards
-  - Search by filename and relative path
-  - Dense diff list table with sortable columns
-  - Filename column + parent-folder path column (`(root)` / `（ルート）` for root files)
-- Preview pane (side-by-side Base vs Compare):
-  - Image
-  - Text
-  - PDF first-page preview with external-open fallback
-  - Audio (play/pause, seek, time, lightweight waveform)
-  - Office files external-open only
-  - Video optional external-open fallback
-- History button + hidden history panel
-- Automatic compare-log save on compare execution
-- Automatic CSV export save on compare execution (`compare_exports`)
-- Compare confirmation when current root state is unsaved:
-  - Save and Compare
-  - Compare Without Saving
-  - Cancel
-- Compare requires at least two snapshots and distinct Base/Compare selection
-- Preview pane can be collapsed/reopened from the pane-local header control
-- App settings:
-  - Language: Japanese / English
-  - UI text size: Small / Medium / Large
-  - Preview cache generations
-  - Preview cache total size cap
-  - Preview cache target extensions
-- External folder snapshot import is available from project `...` menu
-- Project menu includes quick-open for compare CSV export folder
-- Keyboard shortcuts:
-  - `Ctrl+Enter` Compare
-  - `Ctrl+S` Save Snapshot
-  - `Ctrl+H` Toggle History
-  - `Ctrl+F` Focus diff search
-  - `Esc` Collapse preview pane
-  - `Ctrl+0` reset text size, `Ctrl+=` larger text, `Ctrl+-` smaller text
+- 提出物や修正版フォルダを確認するレビュアー
+- バージョン間のメディア／ドキュメント更新を比較したいチーム
+- プロジェクトごとに、比較履歴を継続的に残したいユーザー
 
-## Snapshot Metadata vs Preview Cache
+## v0.1でできること
 
-- Snapshots are metadata-first and lightweight:
-  - relative path
-  - file size
-  - modified time
-  - snapshot created time
-- Full folder copies are not stored per snapshot.
-- Preview cache is independent from snapshot metadata.
-- Preview cache stores preview-target files with content-hash dedupe.
-- Cache retention is pruned automatically by:
-  - max generations
-  - max total cache size
+- プロジェクトの作成 / 切替
+- フォルダスナップショットの保存
+- Base / Compare スナップショットの比較
+- Scope による比較結果の絞り込み（`全体` / `選択`）
+- 追加 / 削除 / 更新 / 同一 の結果表示
+- ファイル名・相対パスでの検索
+- Base / Compare の左右プレビュー
+  - 画像
+  - テキスト
+  - PDF（先頭ページプレビュー + フォールバック）
+  - 音声（再生 / 一時停止、シーク、再生時間、波形表示）
+  - 動画（バックエンドが利用可能な場合の簡易埋め込みプレビュー）
+- 比較実行時の CSV 自動出力
+- 履歴パネルの表示（スナップショット / 保存済み比較結果）
 
-## Data location
+## v0.1でやらないこと
 
-- Default app data directory:
-  - Windows: `%USERPROFILE%\\AppData\\Local\\ReCheck`
-- Override with:
-  - `RECHECK_DATA_DIR`
+- ラベル付け / 優先度付け / 自動判定
+- コメント運用
+- 同期 / マージ
+- 自動修正 / ルールエンジン
+- 移動 / リネーム検知  
+  （配置だけ変わった変更は、追加 + 削除として扱います）
 
-## Smoke Validation
+## クイックスタート（EXE利用者向け）
 
-The implementation was validated locally with offscreen smoke checks for:
-- lightweight snapshot creation
-- preview cache creation and pruning
-- project-menu external folder snapshot import workflow
-- new-project reset state (Base/Compare/results/preview) and post-create guidance
-- compare branches (save/without-save/cancel) and insufficient-snapshot guidance
-- preview pipeline across image/text/PDF/audio/unsupported cases
-- language switching (Japanese/English)
-- audio waveform sample generation
-- PDF first-page preview path and fallback path
-- pane-local preview collapse/reopen behavior
+### 1) 起動
+
+- `ReCheck.exe` を実行してください。
+- 通常の exe 利用では **Python は不要**です。
+
+このリポジトリからビルドした場合の exe の場所:
+
+- `dist\\ReCheck\\ReCheck.exe`
+
+### 2) 初回利用の流れ
+
+1. プロジェクトを作成する
+   - プロジェクト名
+   - ルートフォルダ
+   - スナップショット保存先
+   - 除外ルール
+2. `スナップショット保存` を実行する
+3. `Base` と `Compare` のスナップショットを選ぶ
+4. `比較実行` を押す
+5. Scope を使って比較範囲を絞る
+   - `全体`：プロジェクト全体
+   - `選択`：チェックしたフォルダのみ
+6. 差分行を選択して、Base / Compare のプレビューを確認する
+7. 出力された CSV で比較結果を確認する
+
+## CSV出力
+
+- 比較実行時に CSV が自動保存されます。
+- 保存場所:
+  - `%LOCALAPPDATA%\\ReCheck\\projects\\<project_id>\\compare_exports\\`
+  - または `RECHECK_DATA_DIR\\projects\\<project_id>\\compare_exports\\`  
+    （環境変数で上書きしている場合）
+- プロジェクトメニューからすぐ開けます:
+  - `Open Latest Compare CSV`
+  - `Open Compare CSV Folder`
+
+## ユーザーデータの保存場所
+
+既定のアプリデータ保存先:
+
+- `%LOCALAPPDATA%\\ReCheck`
+
+保存内容の例:
+
+- `projects\\...`  
+  プロジェクト設定、比較ログ
+- 設定されたスナップショット保存先
+- プレビューキャッシュ
+
+任意の保存先に変更したい場合:
+
+- 環境変数 `RECHECK_DATA_DIR` を設定してください
+
+## 対応プレビュー形式
+
+- 画像：対応
+- テキスト：対応
+- PDF：先頭ページプレビュー  
+  （環境によっては外部起動へフォールバック）
+- 音声：対応（波形付き）
+- Officeファイル（`.docx`, `.xlsx`, `.pptx` など）：外部起動のみ
+- 動画：簡易プレビュー経路はありますが、再生可否はローカル環境のマルチメディアバックエンドやコーデックに依存します
+
+## 既知の制限
+
+- 動画プレビューは環境依存です。
+- PDF描画の対応状況は環境によって異なります。外部起動へのフォールバックがあります。
+- タイムゾーン情報を持たない日時は、そのまま表示されます。
+- 移動 / リネーム検知は v0.1 には含まれていません。
+- 安定性優先のため、one-file exe 化は意図的に見送っています。配布は onedir 形式を前提としています。
+
+## キーボードショートカット
+
+- `Ctrl+Enter`：比較実行
+- `Ctrl+S`：スナップショット保存
+- `Ctrl+H`：履歴を開く
+- `Ctrl+F`：検索欄にフォーカス
+- `Esc`：Previewペインを閉じる
+- `Ctrl+0`：文字サイズを標準に戻す
+- `Ctrl+=`：文字を大きくする
+- `Ctrl+-`：文字を小さくする
+
+## 配布時の注意
+
+- 推奨配布形式は **onedir**（`dist\\ReCheck\\` フォルダ一式）です。
+- `_internal` フォルダは `ReCheck.exe` と同じ場所に置いてください。分離しないでください。
+
+---
+
+## 補足：ソース実行 / ビルド（開発者向け）
+
+### ソースから実行
+
+```powershell
+python -m pip install -r requirements.txt
+$env:PYTHONPATH = "src"
+python -m recheck
