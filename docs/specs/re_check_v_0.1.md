@@ -657,3 +657,17 @@ v0.1 では以下を保存する。
 - Diff Results table is migrated from item-based widget binding to model/view (`QTableView` + dedicated read-only model + filter proxy) while keeping compare/save/history/preview semantics unchanged.
 - Filter switching/search now operate as view-layer filtering over the current compare dataset without recomputing compare results or rebuilding widget items per row.
 - On first result display after compare, initial visible state defaults to difference-focused rows (added/removed/modified), with unchanged hidden by default; `all` remains available to show unchanged rows.
+
+## v0.1 delta note (2026-03-12, quick-guide)
+- Added a lightweight first-run quick guide overlay (coach-mark style) that highlights: app settings, project setup area, save snapshot, and Base/Compare + Compare actions.
+- Quick guide supports `Next`/`Skip`/`Finish`, dims the rest of the UI during guidance, and is skippable.
+- Completion/skip state is persisted in app settings (`quick_guide_completed`) so the guide is not auto-shown repeatedly.
+- Added a manual reopen entry (`Show Quick Guide`) under the settings menu.
+
+## v0.1 delta note (2026-03-12, quick-guide-refine)
+- Initial setup wording was clarified for non-technical users:
+  - `ルートフォルダ` label changed to `比較対象フォルダ`.
+  - Setup helper text now briefly explains the tool purpose and next action.
+- Quick guide was refined from 4 to 5 focused steps:
+  - Base/Compare snapshot selection and Compare execution are now separated.
+- Spotlight targets were narrowed so the snapshot-selection step highlights only Base/Compare selectors, and the final step highlights only the Compare button.

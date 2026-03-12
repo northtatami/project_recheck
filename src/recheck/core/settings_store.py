@@ -55,6 +55,7 @@ class AppSettingsStore:
         if settings.ui_text_size not in {"small", "medium", "large"}:
             settings.ui_text_size = "medium"
         settings.preview_pane_visible = bool(settings.preview_pane_visible)
+        settings.quick_guide_completed = bool(settings.quick_guide_completed)
         return settings
 
     def save(self, settings: AppSettings) -> AppSettings:

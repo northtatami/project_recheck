@@ -15,3 +15,22 @@ app start
    - `python -m pip install -r requirements.txt`
 2. Run the app:
    - PowerShell: `$env:PYTHONPATH="src"; python -m recheck`
+
+───────────────────────────────────────────
+初回起動
+───────────────────────────────────────────
+Remove-Item "C:\Work\Project_Recheck\tmp\first_run_test" -Recurse -Force -ErrorAction SilentlyContinue
+$env:PYTHONPATH="src"
+$env:RECHECK_DATA_DIR="C:\Work\Project_Recheck\tmp\first_run_test"
+python -m recheck
+
+
+───────────────────────────────────────────
+exe化
+───────────────────────────────────────────
+cd C:\Work\Project_Recheck
+python -m pip install -r requirements-build.txt
+powershell -ExecutionPolicy Bypass -File .\scripts\build_exe.ps1
+.\dist\ReCheck\ReCheck.exe
+
+

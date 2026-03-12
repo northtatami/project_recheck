@@ -42,6 +42,7 @@ class AppSettings:
     preview_cache_max_total_size_gb: float = 10.0
     preview_cache_target_extensions: list[str] = field(default_factory=list)
     preview_pane_visible: bool = True
+    quick_guide_completed: bool = False
     created_at: str = ""
     updated_at: str = ""
 
@@ -62,6 +63,7 @@ class AppSettings:
             preview_cache_max_total_size_gb=float(data.get("preview_cache_max_total_size_gb", 10.0)),
             preview_cache_target_extensions=list(data.get("preview_cache_target_extensions", [])),
             preview_pane_visible=bool(data.get("preview_pane_visible", True)),
+            quick_guide_completed=bool(data.get("quick_guide_completed", False)),
             created_at=str(data.get("created_at", "")),
             updated_at=str(data.get("updated_at", "")),
         )

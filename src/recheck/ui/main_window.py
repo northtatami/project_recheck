@@ -11,8 +11,9 @@ from time import perf_counter
 from typing import Callable
 
 from PySide6.QtCore import QObject, QModelIndex, QRunnable, QThreadPool, QTimer, Qt, Signal
-from PySide6.QtGui import QAction, QBrush, QColor, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QBrush, QColor, QKeySequence, QShortcut, QShowEvent
 from PySide6.QtWidgets import (
+    QApplication,
     QAbstractItemView,
     QButtonGroup,
     QComboBox,
@@ -52,6 +53,7 @@ from recheck.core.settings_store import AppSettingsStore
 from recheck.core.snapshot_store import SnapshotStore
 from recheck.ui.history_panel import HistoryPanel
 from recheck.ui.i18n import I18n
+from recheck.ui.quick_guide_overlay import QuickGuideOverlay, QuickGuideStep, rect_from_widgets
 from recheck.ui.preview_widgets import FilePreviewColumn
 from recheck.ui.diff_table_model import DiffFilterProxyModel, DiffTableModel
 from recheck.ui.settings_dialog import SettingsDialog
@@ -216,6 +218,8 @@ class RecheckMainWindow(QMainWindow):
         self._scope_filter_status_groups: dict[str, list[DiffEntry]] = {status: [] for status in STATUSES}
         self._scope_filter_counts: dict[str, int] = {status: 0 for status in STATUSES}
         self._pending_initial_snapshot_project_id: str | None = None
+        self._quick_guide_overlay: QuickGuideOverlay | None = None
+        self._quick_guide_auto_checked = False
 
         self.setWindowTitle("Re:Check - Diff Review for folders")
         self.resize(1580, 920)
@@ -225,6 +229,13 @@ class RecheckMainWindow(QMainWindow):
         self._retranslate_ui()
         self._load_projects()
         self.preview_cache_store.prune(self.settings)
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        if self._quick_guide_auto_checked:
+            return
+        self._quick_guide_auto_checked = True
+        QTimer.singleShot(500, lambda: self._maybe_show_first_run_quick_guide(manual=False))
 
     def _t(self, key: str, **kwargs: object) -> str:
         return self.i18n.t(key, **kwargs)
@@ -2331,6 +2342,10 @@ class RecheckMainWindow(QMainWindow):
         app_action.triggered.connect(self._open_settings_dialog)
         menu.addAction(app_action)
 
+        guide_action = QAction(self._t("settings.show_quick_guide"), self)
+        guide_action.triggered.connect(lambda: self._maybe_show_first_run_quick_guide(manual=True))
+        menu.addAction(guide_action)
+
         reset_layout_action = QAction(self._t("settings.reset_layout"), self)
         reset_layout_action.triggered.connect(self._reset_layout_defaults)
         menu.addAction(reset_layout_action)
@@ -2398,6 +2413,76 @@ class RecheckMainWindow(QMainWindow):
 
     def _show_command_palette_stub(self) -> None:
         QMessageBox.information(self, "Ctrl+K", self._t("msg.command_palette_stub"))
+
+    def _build_quick_guide_steps(self) -> list[QuickGuideStep]:
+        return [
+            QuickGuideStep(
+                title=self._t("guide.step.settings.title"),
+                message=self._t("guide.step.settings.body"),
+                target_rect=lambda: rect_from_widgets(self, [self.settings_button], padding=6),
+            ),
+            QuickGuideStep(
+                title=self._t("guide.step.project.title"),
+                message=self._t("guide.step.project.body"),
+                target_rect=lambda: rect_from_widgets(self, [self.project_selector, self.project_menu_button], padding=6),
+            ),
+            QuickGuideStep(
+                title=self._t("guide.step.snapshot.title"),
+                message=self._t("guide.step.snapshot.body"),
+                target_rect=lambda: rect_from_widgets(self, [self.snapshot_button], padding=6),
+            ),
+            QuickGuideStep(
+                title=self._t("guide.step.snapshot_select.title"),
+                message=self._t("guide.step.snapshot_select.body"),
+                target_rect=lambda: rect_from_widgets(
+                    self,
+                    [self.base_selector, self.compare_selector],
+                    padding=8,
+                ),
+            ),
+            QuickGuideStep(
+                title=self._t("guide.step.compare.title"),
+                message=self._t("guide.step.compare.body"),
+                target_rect=lambda: rect_from_widgets(self, [self.compare_button], padding=8),
+            ),
+        ]
+
+    def _maybe_show_first_run_quick_guide(self, *, manual: bool) -> None:
+        if self._quick_guide_overlay and self._quick_guide_overlay.isVisible():
+            return
+        if not manual and self.settings.quick_guide_completed:
+            return
+        if not self.isVisible():
+            return
+        active_modal = QApplication.activeModalWidget()
+        if active_modal is not None:
+            if not manual:
+                QTimer.singleShot(700, lambda: self._maybe_show_first_run_quick_guide(manual=False))
+            else:
+                self.statusBar().showMessage(self._t("guide.msg.wait_modal"), 3000)
+            return
+        self._show_quick_guide(manual=manual)
+
+    def _show_quick_guide(self, *, manual: bool) -> None:
+        if self._quick_guide_overlay and self._quick_guide_overlay.isVisible():
+            return
+        steps = self._build_quick_guide_steps()
+        if not steps:
+            return
+        overlay = QuickGuideOverlay(parent=self, steps=steps, tr=self._t)
+        overlay.finished.connect(lambda result, is_manual=manual: self._on_quick_guide_finished(result, is_manual))
+        self._quick_guide_overlay = overlay
+        overlay.start()
+
+    def _on_quick_guide_finished(self, result: str, _manual: bool) -> None:
+        self._quick_guide_overlay = None
+        if not self.settings.quick_guide_completed:
+            self.settings.quick_guide_completed = True
+            self.settings_store.save(self.settings)
+        if result == "completed":
+            self.statusBar().showMessage(self._t("guide.msg.completed"), 3000)
+        else:
+            self.statusBar().showMessage(self._t("guide.msg.skipped"), 3000)
 
     def _select_snapshots_by_date(self) -> None:
         if not self.snapshots:

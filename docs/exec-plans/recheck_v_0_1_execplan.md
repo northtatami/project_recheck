@@ -465,3 +465,13 @@ v0.1 MVP は以下を満たしたら完了とする。
 - Migrated Diff Results table layer to model/view (`QTableView` with a dedicated read-only table model and filter proxy).
 - Kept compare computation unchanged; filter switching and search now update proxy/view state over already prepared result data.
 - Applied first-display default visibility of added/removed/modified rows with unchanged hidden, while preserving `all` to include unchanged rows.
+
+## v0.1 delta note (2026-03-12, quick-guide)
+- Added first-run quick-guide onboarding as a lightweight spotlight overlay that points users to key v0.1 actions (settings, project setup, snapshot save, Base/Compare selection and compare execution).
+- Implemented persistent completion state in app settings so the guide auto-runs only for users who have not completed/skipped it.
+- Added a manual quick-guide reopen action in the settings menu for optional re-run.
+
+## v0.1 delta note (2026-03-12, quick-guide-refine)
+- Adjusted setup dialog wording for first-time clarity (`比較対象フォルダ` label and concise purpose/help text).
+- Split quick-guide final action into two steps (snapshot selection vs compare execution) to reduce ambiguity.
+- Tightened spotlight targeting to the exact controls for selection and compare execution.
