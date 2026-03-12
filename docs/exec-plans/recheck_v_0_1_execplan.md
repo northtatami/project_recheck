@@ -460,3 +460,8 @@ v0.1 MVP は以下を満たしたら完了とする。
 - Added post-create onboarding prompt for initial snapshot save to reduce first-project confusion.
 - Reduced scope-tree up-front rendering cost by switching to shallow-first materialization with deferred child-node loading on expand.
 - Reduced filter-switch overhead by caching scope/status result groups per compare dataset and reusing them during UI filtering.
+
+## v0.1 delta note (2026-03-12, phase1-diff-modelview)
+- Migrated Diff Results table layer to model/view (`QTableView` with a dedicated read-only table model and filter proxy).
+- Kept compare computation unchanged; filter switching and search now update proxy/view state over already prepared result data.
+- Applied first-display default visibility of added/removed/modified rows with unchanged hidden, while preserving `all` to include unchanged rows.

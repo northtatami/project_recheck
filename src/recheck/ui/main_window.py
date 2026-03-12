@@ -10,7 +10,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Callable
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, Signal
+from PySide6.QtCore import QObject, QModelIndex, QRunnable, QThreadPool, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QBrush, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -34,8 +34,7 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QSizePolicy,
     QSplitter,
-    QTableWidget,
-    QTableWidgetItem,
+    QTableView,
     QTreeWidget,
     QTreeWidgetItem,
     QTreeWidgetItemIterator,
@@ -54,6 +53,7 @@ from recheck.core.snapshot_store import SnapshotStore
 from recheck.ui.history_panel import HistoryPanel
 from recheck.ui.i18n import I18n
 from recheck.ui.preview_widgets import FilePreviewColumn
+from recheck.ui.diff_table_model import DiffFilterProxyModel, DiffTableModel
 from recheck.ui.settings_dialog import SettingsDialog
 from recheck.ui.setup_dialog import SetupDialog
 from recheck.utils.filetype_utils import detect_preview_type
@@ -176,6 +176,8 @@ class RecheckMainWindow(QMainWindow):
         self.visible_entries: list[DiffEntry] = []
         self.current_entry: DiffEntry | None = None
         self.current_status_filter = "all"
+        self._scope_dataset_model_key: tuple[int, str, tuple[str, ...]] | None = None
+        self._suppress_selection_events = False
         self.latest_counts = {status: 0 for status in STATUSES}
         self.base_manifest: SnapshotManifest | None = None
         self.compare_manifest: SnapshotManifest | None = None
@@ -203,13 +205,6 @@ class RecheckMainWindow(QMainWindow):
         self._scope_children_map: dict[str, list[str]] = {}
         self._scope_materialized_paths: set[str] = set()
         self._scope_expand_token = 0
-        self._table_render_token = 0
-        self._table_render_active = False
-        self._table_render_entries: list[DiffEntry] = []
-        self._table_render_row = 0
-        self._table_render_selected_row: int | None = None
-        self._table_render_target_key: tuple[str, str, str] | None = None
-        self._suppress_selection_events = False
         self._search_apply_timer = QTimer(self)
         self._search_apply_timer.setSingleShot(True)
         self._search_apply_timer.setInterval(180)
@@ -220,7 +215,6 @@ class RecheckMainWindow(QMainWindow):
         self._scope_filter_cache_entries: list[DiffEntry] = []
         self._scope_filter_status_groups: dict[str, list[DiffEntry]] = {status: [] for status in STATUSES}
         self._scope_filter_counts: dict[str, int] = {status: 0 for status in STATUSES}
-        self._entry_search_texts: dict[tuple[str, str, str], str] = {}
         self._pending_initial_snapshot_project_id: str | None = None
 
         self.setWindowTitle("Re:Check - Diff Review for folders")
@@ -443,7 +437,7 @@ class RecheckMainWindow(QMainWindow):
 
         cards = QHBoxLayout()
         self.summary_group = QButtonGroup(self)
-        self.summary_group.setExclusive(True)
+        self.summary_group.setExclusive(False)
 
         self.filter_all_button = QPushButton()
         self.filter_all_button.setCheckable(True)
@@ -467,7 +461,16 @@ class RecheckMainWindow(QMainWindow):
         self.search_box.textChanged.connect(self._on_search_text_changed)
         layout.addWidget(self.search_box)
 
-        self.diff_table = QTableWidget(0, 7)
+        self.diff_table_model = DiffTableModel(
+            status_label=self._status_label,
+            format_timestamp=self._format_table_timestamp,
+            parent_path_display=self._parent_path_display,
+        )
+        self.diff_proxy_model = DiffFilterProxyModel()
+        self.diff_proxy_model.setSourceModel(self.diff_table_model)
+
+        self.diff_table = QTableView()
+        self.diff_table.setModel(self.diff_proxy_model)
         self.diff_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.diff_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.diff_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -478,7 +481,7 @@ class RecheckMainWindow(QMainWindow):
         self.diff_table.horizontalHeader().setFixedHeight(44)
         self._configure_diff_table_columns()
         self.diff_table.setSortingEnabled(True)
-        self.diff_table.itemSelectionChanged.connect(self._on_diff_selection_changed)
+        self.diff_table.selectionModel().selectionChanged.connect(self._on_diff_selection_changed)
         layout.addWidget(self.diff_table, 1)
         return panel
 
@@ -610,7 +613,7 @@ class RecheckMainWindow(QMainWindow):
             QPushButton#summary_removed:checked {{ background: #f2d8d8; }}
             QPushButton#summary_modified:checked {{ background: #d7e6f6; }}
             QPushButton#summary_unchanged:checked {{ background: #e5e7eb; }}
-            QLineEdit, QComboBox, QTreeWidget, QTableWidget, QListWidget, QPlainTextEdit {{
+            QLineEdit, QComboBox, QTreeWidget, QTableView, QListWidget, QPlainTextEdit {{
                 border: 1px solid #c9d7e5;
                 border-radius: 7px;
                 background: white;
@@ -648,7 +651,7 @@ class RecheckMainWindow(QMainWindow):
         self.diff_helper.setText(self._t("helper.diff"))
         self._update_scope_path_label()
         self.search_box.setPlaceholderText(self._t("search.placeholder"))
-        self.diff_table.setHorizontalHeaderLabels(
+        self.diff_table_model.set_headers(
             [
                 self._t("table.type"),
                 self._t("table.file_name"),
@@ -991,11 +994,16 @@ class RecheckMainWindow(QMainWindow):
                 return
 
     def _clear_results(self) -> None:
-        self._table_render_token += 1
-        self._table_render_active = False
         self.diff_entries = []
         self.visible_entries = []
         self.current_entry = None
+        self.current_status_filter = "all"
+        self._scope_dataset_model_key = None
+        self._suppress_selection_events = True
+        self.filter_all_button.setChecked(True)
+        for button in self.summary_buttons.values():
+            button.setChecked(False)
+        self._suppress_selection_events = False
         self.latest_counts = {status: 0 for status in STATUSES}
         self._invalidate_diff_dataset_cache()
         self.base_manifest = None
@@ -1004,7 +1012,9 @@ class RecheckMainWindow(QMainWindow):
         self.preview_info.setText(self._t("preview.info.empty"))
         self.base_preview.show_file(None, empty_message=self._t("preview.none"), modified_time=None, size=None)
         self.compare_preview.show_file(None, empty_message=self._t("preview.none"), modified_time=None, size=None)
-        self.diff_table.setRowCount(0)
+        self.diff_proxy_model.set_status_mode("all")
+        self.diff_proxy_model.set_search_text("")
+        self.diff_table_model.set_entries([])
         self._update_summary_counts(self.latest_counts)
 
     def _reset_project_view_state(self) -> None:
@@ -1396,8 +1406,7 @@ class RecheckMainWindow(QMainWindow):
         self.compare_manifest = compare_manifest
         self.diff_entries = [item for item in entries if isinstance(item, DiffEntry)]
         self._invalidate_diff_dataset_cache()
-        self._prepare_entry_search_cache()
-        self._apply_filters_to_table()
+        self._set_default_changed_filter_state()
         self._update_scope_badges(self.diff_entries)
 
         base_id = bundle.get("base_id")
@@ -1477,27 +1486,17 @@ class RecheckMainWindow(QMainWindow):
         for status, button in self.summary_buttons.items():
             button.setText(f"{self._status_label(status)} {counts.get(status, 0)}")
 
-    def _count_entries(self, entries: list[DiffEntry]) -> dict[str, int]:
-        counts = {status: 0 for status in STATUSES}
-        for entry in entries:
-            counts[entry.status] = counts.get(entry.status, 0) + 1
-        return counts
-
-    def _entry_key(self, entry: DiffEntry) -> tuple[str, str, str]:
+    @staticmethod
+    def _entry_key(entry: DiffEntry) -> tuple[str, str, str]:
         return (entry.relative_path, entry.status, entry.file_name)
 
     def _invalidate_diff_dataset_cache(self) -> None:
         self._diff_dataset_version += 1
         self._scope_filter_cache_key = None
+        self._scope_dataset_model_key = None
         self._scope_filter_cache_entries = []
         self._scope_filter_status_groups = {status: [] for status in STATUSES}
         self._scope_filter_counts = {status: 0 for status in STATUSES}
-        self._entry_search_texts = {}
-
-    def _prepare_entry_search_cache(self) -> None:
-        self._entry_search_texts = {
-            self._entry_key(entry): f"{entry.file_name.lower()}\n{entry.relative_path.lower()}" for entry in self.diff_entries
-        }
 
     def _resolve_scope_filter_bundle(self) -> tuple[list[DiffEntry], dict[str, list[DiffEntry]], dict[str, int]]:
         mode = self._current_scope_mode()
@@ -1531,34 +1530,29 @@ class RecheckMainWindow(QMainWindow):
         self._scope_filter_counts = counts
         return scope_entries, status_groups, counts
 
-    def _scope_filtered_entries(self, entries: list[DiffEntry]) -> list[DiffEntry]:
-        if self._current_scope_mode() == "whole":
-            return list(entries)
-        scope_folders = self._selected_scope_folders()
-        if not scope_folders:
-            return []
-        if "" in scope_folders:
-            return list(entries)
-
-        filtered: list[DiffEntry] = []
-        for entry in entries:
-            rel = normalize_relpath(entry.relative_path)
-            for folder in scope_folders:
-                if rel == folder or rel.startswith(f"{folder}/"):
-                    filtered.append(entry)
-                    break
-        return filtered
-
     def _set_status_filter(self, status: str) -> None:
         self.current_status_filter = status
+        self._sync_status_buttons(status)
+        self._apply_filters_to_table()
+
+    def _sync_status_buttons(self, status: str) -> None:
         if status == "all":
             self.filter_all_button.setChecked(True)
             for button in self.summary_buttons.values():
                 button.setChecked(False)
-        else:
+            return
+        if status == "changed_default":
             self.filter_all_button.setChecked(False)
             for key, button in self.summary_buttons.items():
-                button.setChecked(key == status)
+                button.setChecked(key in {"added", "removed", "modified"})
+            return
+        self.filter_all_button.setChecked(False)
+        for key, button in self.summary_buttons.items():
+            button.setChecked(key == status)
+
+    def _set_default_changed_filter_state(self) -> None:
+        self.current_status_filter = "changed_default"
+        self._sync_status_buttons("changed_default")
         self._apply_filters_to_table()
 
     def _on_search_text_changed(self) -> None:
@@ -1567,160 +1561,84 @@ class RecheckMainWindow(QMainWindow):
 
     def _apply_filters_to_table(self) -> None:
         apply_start = perf_counter()
-        self._table_render_token += 1
-        token = self._table_render_token
-        self._table_render_active = False
         current_key = None
         if self.current_entry:
             current_key = (self.current_entry.relative_path, self.current_entry.status, self.current_entry.file_name)
 
-        scope_filtered, status_groups, scope_counts = self._resolve_scope_filter_bundle()
+        scope_filtered, _status_groups, scope_counts = self._resolve_scope_filter_bundle()
         self.latest_counts = dict(scope_counts)
         self._update_summary_counts(self.latest_counts)
         self._update_scope_path_label()
 
-        search = self.search_box.text().strip().lower()
-        filtered = scope_filtered if self.current_status_filter == "all" else status_groups.get(self.current_status_filter, [])
-        if search:
-            search_cache = self._entry_search_texts
-            filtered = [
-                entry
-                for entry in filtered
-                if search in search_cache.get(self._entry_key(entry), f"{entry.file_name.lower()}\n{entry.relative_path.lower()}")
-            ]
+        model_key = self._scope_filter_cache_key
+        if model_key != self._scope_dataset_model_key:
+            self.diff_table_model.set_entries(scope_filtered)
+            self._scope_dataset_model_key = model_key
 
-        self.visible_entries = filtered
-        selected_row = None
-        if current_key:
-            for idx, entry in enumerate(filtered):
-                if (entry.relative_path, entry.status, entry.file_name) == current_key:
-                    selected_row = idx
-                    break
+        self.diff_proxy_model.set_status_mode(self.current_status_filter)
+        self.diff_proxy_model.set_search_text(self.search_box.text())
+        visible_count = self.diff_proxy_model.rowCount()
+        self.visible_entries = []
 
-        self._table_render_entries = filtered
-        self._table_render_row = 0
-        self._table_render_selected_row = selected_row
-        self._table_render_target_key = current_key
-
-        self._suppress_selection_events = True
-        self.diff_table.setSortingEnabled(False)
-        self.diff_table.setRowCount(len(filtered))
-        self._suppress_selection_events = False
-
-        if not filtered:
+        if visible_count <= 0:
             self.current_entry = None
             self._update_preview(None)
-            self.diff_table.setSortingEnabled(True)
             self._last_apply_duration_ms = (perf_counter() - apply_start) * 1000.0
             LOGGER.debug("diff table apply complete: rows=%d elapsed_ms=%.2f", 0, self._last_apply_duration_ms)
             return
 
-        target_row = selected_row if selected_row is not None else 0
-        if 0 <= target_row < len(filtered):
-            self.current_entry = filtered[target_row]
-            self._update_preview(self.current_entry)
-
-        self._table_render_active = True
-        self.statusBar().showMessage(
-            self._t("msg.rendering_results_progress", done=0, total=len(filtered)),
-            2000,
-        )
-        QTimer.singleShot(0, lambda t=token, started=apply_start: self._populate_table_chunk(t, started))
-
-    def _build_table_row_items(self, entry: DiffEntry) -> list[QTableWidgetItem]:
-        row_items = [
-            self._status_label(entry.status),
-            entry.file_name,
-            self._parent_path_display(entry.relative_path),
-            self._format_table_timestamp(entry.base_modified_time),
-            self._format_table_timestamp(entry.compare_modified_time),
-            "-" if entry.base_size is None else str(entry.base_size),
-            "-" if entry.compare_size is None else str(entry.compare_size),
-        ]
-        items: list[QTableWidgetItem] = []
-        for col, value in enumerate(row_items):
-            item = QTableWidgetItem(value)
-            if col == 0:
-                item.setData(Qt.ItemDataRole.UserRole, entry)
-                status_colors = {
-                    "added": QColor("#e9f6ed"),
-                    "removed": QColor("#faecec"),
-                    "modified": QColor("#ecf3fa"),
-                    "unchanged": QColor("#f2f3f5"),
-                }
-                item.setBackground(QBrush(status_colors.get(entry.status, QColor("#ffffff"))))
-            if col == 1:
-                item.setToolTip(entry.relative_path)
-            if col == 2:
-                item.setToolTip(entry.relative_path)
-                item.setForeground(QBrush(QColor("#5f7387")))
-            if col == 3 and entry.base_modified_time:
-                item.setToolTip(entry.base_modified_time)
-            if col == 4 and entry.compare_modified_time:
-                item.setToolTip(entry.compare_modified_time)
-            items.append(item)
-        return items
-
-    def _populate_table_chunk(self, token: int, apply_start: float) -> None:
-        if token != self._table_render_token:
-            return
-        if not self._table_render_active:
-            return
-
-        total = len(self._table_render_entries)
-        if total == 0:
-            self._table_render_active = False
-            self.diff_table.setSortingEnabled(True)
-            return
-
-        chunk_size = 400
-        end = min(total, self._table_render_row + chunk_size)
+        target_row = self._find_proxy_row_for_key(current_key) if current_key else None
+        if target_row is None:
+            target_row = 0
         self._suppress_selection_events = True
-        for row in range(self._table_render_row, end):
-            entry = self._table_render_entries[row]
-            for col, item in enumerate(self._build_table_row_items(entry)):
-                self.diff_table.setItem(row, col, item)
+        self.diff_table.selectRow(target_row)
         self._suppress_selection_events = False
-        self._table_render_row = end
-
-        if end < total:
-            self.statusBar().showMessage(
-                self._t("msg.rendering_results_progress", done=end, total=total),
-                2000,
-            )
-            QTimer.singleShot(0, lambda t=token, started=apply_start: self._populate_table_chunk(t, started))
-            return
-
-        self._table_render_active = False
-        self.diff_table.setSortingEnabled(True)
-        target_row = self._table_render_selected_row if self._table_render_selected_row is not None else 0
-        if 0 <= target_row < total:
-            self._suppress_selection_events = True
-            self.diff_table.selectRow(target_row)
-            self._suppress_selection_events = False
-            self.current_entry = self._table_render_entries[target_row]
-            self._update_preview(self.current_entry)
+        selected_entry = self._entry_from_proxy_row(target_row)
+        self.current_entry = selected_entry
+        self._update_preview(selected_entry)
         self._last_apply_duration_ms = (perf_counter() - apply_start) * 1000.0
         LOGGER.debug(
-            "diff table apply complete: rows=%d elapsed_ms=%.2f",
-            total,
+            "diff table apply complete: rows=%d elapsed_ms=%.2f filter=%s",
+            visible_count,
             self._last_apply_duration_ms,
+            self.current_status_filter,
         )
 
-    def _on_diff_selection_changed(self) -> None:
+    def _entry_from_proxy_index(self, proxy_index: QModelIndex) -> DiffEntry | None:
+        if not proxy_index.isValid():
+            return None
+        source_index = self.diff_proxy_model.mapToSource(proxy_index)
+        if not source_index.isValid():
+            return None
+        entry = source_index.data(DiffTableModel.ENTRY_ROLE)
+        if isinstance(entry, DiffEntry):
+            return entry
+        return self.diff_table_model.entry_at(source_index.row())
+
+    def _entry_from_proxy_row(self, row: int) -> DiffEntry | None:
+        return self._entry_from_proxy_index(self.diff_proxy_model.index(row, 0))
+
+    def _find_proxy_row_for_key(self, key: tuple[str, str, str] | None) -> int | None:
+        if key is None:
+            return None
+        row_count = self.diff_proxy_model.rowCount()
+        for row in range(row_count):
+            entry = self._entry_from_proxy_row(row)
+            if entry and self._entry_key(entry) == key:
+                return row
+        return None
+
+    def _on_diff_selection_changed(self, *_args) -> None:
         if self._suppress_selection_events:
             return
-        selected = self.diff_table.selectedItems()
+        selection_model = self.diff_table.selectionModel()
+        if selection_model is None:
+            return
+        selected = selection_model.selectedRows()
         if not selected:
             return
-        payload = selected[0].data(Qt.ItemDataRole.UserRole)
-        if not payload:
-            return
-        if isinstance(payload, DiffEntry):
-            entry = payload
-        elif isinstance(payload, dict):
-            entry = DiffEntry.from_dict(payload)
-        else:
+        entry = self._entry_from_proxy_index(selected[0])
+        if entry is None:
             return
         self.current_entry = entry
         self._update_preview(entry)
@@ -2197,7 +2115,6 @@ class RecheckMainWindow(QMainWindow):
         self._apply_scope_tree_mode_visuals()
         self.diff_entries = record.entries
         self._invalidate_diff_dataset_cache()
-        self._prepare_entry_search_cache()
         self._apply_filters_to_table()
 
     def _open_project_menu(self) -> None:
@@ -2430,6 +2347,7 @@ class RecheckMainWindow(QMainWindow):
         self.settings.ui_text_size = size_key
         self.settings_store.save(self.settings)
         self._apply_style()
+        self.diff_table.verticalHeader().setDefaultSectionSize(self._diff_row_height())
         self._apply_filters_to_table()
         self.statusBar().showMessage(self._t("msg.text_size_changed", size=self._t(f"text_size.{size_key}")), 4000)
 

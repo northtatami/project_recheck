@@ -652,3 +652,8 @@ v0.1 では以下を保存する。
 - New project creation now prompts whether to save an initial snapshot immediately; selecting save can assign the new snapshot to Base and Compare for clearer first-step onboarding.
 - Scope tree rendering now prioritizes shallow initial materialization and loads deeper branches on expansion, reducing up-front tree UI cost on large folder structures.
 - Diff filter switching now reuses cached scope/status groups from the current compare dataset to avoid unnecessary repeated full-list filtering work.
+
+## v0.1 delta note (2026-03-12, phase1-diff-modelview)
+- Diff Results table is migrated from item-based widget binding to model/view (`QTableView` + dedicated read-only model + filter proxy) while keeping compare/save/history/preview semantics unchanged.
+- Filter switching/search now operate as view-layer filtering over the current compare dataset without recomputing compare results or rebuilding widget items per row.
+- On first result display after compare, initial visible state defaults to difference-focused rows (added/removed/modified), with unchanged hidden by default; `all` remains available to show unchanged rows.
