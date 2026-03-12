@@ -479,3 +479,8 @@ v0.1 MVP は以下を満たしたら完了とする。
 ## v0.1 delta note (2026-03-12, onboarding-refine-2)
 - In brand-new project setup, comparison target folder input now starts empty (no auto-filled user home path).
 - Added clearer target-folder placeholder text and validation wording for missing/invalid target folders.
+
+## v0.1 delta note (2026-03-12, pre-distribution-hardening)
+- Added built-in default directory exclusions during snapshot scanning and scope-tree path scanning: `node_modules`, `.git`, `.venv`, `venv`, `__pycache__`.
+- Hardened snapshot persistence to atomic write for `manifest.json` and snapshot `index.json` (`.tmp` write + replace).
+- Added safe stale-temp cleanup/ignore path for snapshot temp files so incomplete temp artifacts are not treated as valid snapshot data.

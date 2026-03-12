@@ -46,7 +46,7 @@ from PySide6.QtWidgets import (
 
 from recheck import __version__
 from recheck.core.compare_service import CompareLogStore, compare_snapshots
-from recheck.core.file_scanner import scan_folder
+from recheck.core.file_scanner import is_default_excluded_dir_name, scan_folder
 from recheck.core.models import AppSettings, CompareLogRecord, DiffEntry, ProjectConfig, SnapshotManifest, SnapshotRecord
 from recheck.core.preview_cache import PreviewCacheStore
 from recheck.core.project_store import ProjectStore
@@ -857,6 +857,8 @@ class RecheckMainWindow(QMainWindow):
                     for entry in it:
                         try:
                             if not entry.is_dir(follow_symlinks=False):
+                                continue
+                            if is_default_excluded_dir_name(entry.name):
                                 continue
                             rel = normalize_relpath(str(Path(entry.path).relative_to(root_path)))
                             if rel and rel != ".":

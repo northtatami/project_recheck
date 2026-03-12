@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from recheck.core.file_scanner import scan_folder
@@ -22,22 +23,79 @@ class SnapshotStore:
     def _index_file(self, project: ProjectConfig) -> Path:
         return Path(project.snapshot_dir) / "index.json"
 
+    def _index_tmp_file(self, project: ProjectConfig) -> Path:
+        return Path(project.snapshot_dir) / "index.json.tmp"
+
     def _snapshot_folder(self, project: ProjectConfig, snapshot_id: str) -> Path:
         return Path(project.snapshot_dir) / snapshot_id
 
+    @staticmethod
+    def _manifest_file(snapshot_root: Path) -> Path:
+        return snapshot_root / "manifest.json"
+
+    @staticmethod
+    def _manifest_tmp_file(snapshot_root: Path) -> Path:
+        return snapshot_root / "manifest.json.tmp"
+
+    def _cleanup_stale_tmp_files(self, project: ProjectConfig) -> None:
+        snapshot_dir = Path(project.snapshot_dir)
+        stale_paths: list[Path] = [self._index_tmp_file(project)]
+        if snapshot_dir.exists():
+            for entry in snapshot_dir.iterdir():
+                if entry.is_dir():
+                    stale_paths.append(self._manifest_tmp_file(entry))
+        for stale in stale_paths:
+            try:
+                if stale.exists() and stale.is_file():
+                    stale.unlink()
+            except OSError:
+                continue
+
+    def _atomic_write_json(self, target_path: Path, payload: object) -> None:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = target_path.with_name(f"{target_path.name}.tmp")
+        try:
+            with tmp_path.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, target_path)
+        except Exception:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
+            raise
+
     def _load_index(self, project: ProjectConfig) -> list[SnapshotRecord]:
+        self._cleanup_stale_tmp_files(project)
         index_path = self._index_file(project)
         if not index_path.exists():
             return []
         with index_path.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
-        return [SnapshotRecord.from_dict(item) for item in payload]
+        records: list[SnapshotRecord] = []
+        if not isinstance(payload, list):
+            return records
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            try:
+                record = SnapshotRecord.from_dict(item)
+            except (KeyError, TypeError, ValueError):
+                continue
+            manifest_path = Path(record.manifest_path)
+            if str(manifest_path).endswith(".tmp"):
+                continue
+            if not manifest_path.exists():
+                continue
+            records.append(record)
+        return records
 
     def _save_index(self, project: ProjectConfig, records: list[SnapshotRecord]) -> None:
         index_path = self._index_file(project)
-        index_path.parent.mkdir(parents=True, exist_ok=True)
-        with index_path.open("w", encoding="utf-8") as handle:
-            json.dump([record.to_dict() for record in records], handle, ensure_ascii=False, indent=2)
+        self._atomic_write_json(index_path, [record.to_dict() for record in records])
 
     def list_snapshots(self, project: ProjectConfig) -> list[SnapshotRecord]:
         records = self._load_index(project)
@@ -61,6 +119,7 @@ class SnapshotStore:
 
         snapshot_root = self._snapshot_folder(project, snapshot_id)
         snapshot_root.mkdir(parents=True, exist_ok=True)
+        self._cleanup_stale_tmp_files(project)
 
         scanned_files = scan_folder(snapshot_source, project.exclude_rules, skipped_paths=scan_warnings)
         generation = self.preview_cache_store.cache_snapshot_files(
@@ -93,9 +152,8 @@ class SnapshotStore:
             preview_generation_id=generation.generation_id,
             files=manifest_files,
         )
-        manifest_path = snapshot_root / "manifest.json"
-        with manifest_path.open("w", encoding="utf-8") as handle:
-            json.dump(manifest.to_dict(), handle, ensure_ascii=False, indent=2)
+        manifest_path = self._manifest_file(snapshot_root)
+        self._atomic_write_json(manifest_path, manifest.to_dict())
 
         record = SnapshotRecord(
             snapshot_id=snapshot_id,
@@ -117,6 +175,8 @@ class SnapshotStore:
             if record.snapshot_id != snapshot_id:
                 continue
             manifest_path = Path(record.manifest_path)
+            if str(manifest_path).endswith(".tmp"):
+                continue
             if not manifest_path.exists():
                 raise FileNotFoundError(f"Snapshot manifest does not exist: {manifest_path}")
             with manifest_path.open("r", encoding="utf-8") as handle:

@@ -8,6 +8,16 @@ from pathlib import Path
 
 from recheck.utils.path_utils import normalize_relpath
 
+DEFAULT_EXCLUDED_DIR_NAMES = frozenset(
+    {
+        "node_modules",
+        ".git",
+        ".venv",
+        "venv",
+        "__pycache__",
+    }
+)
+
 
 @dataclass
 class ScannedFile:
@@ -24,7 +34,20 @@ def _matches_pattern(rel_path: str, pattern: str) -> bool:
     return fnmatch.fnmatch(normalized, pattern) or fnmatch.fnmatch(name, pattern)
 
 
+def is_default_excluded_dir_name(name: str) -> bool:
+    return name.strip().lower() in DEFAULT_EXCLUDED_DIR_NAMES
+
+
+def _has_default_excluded_dir_component(rel_path: str) -> bool:
+    normalized = normalize_relpath(rel_path)
+    if not normalized or normalized == ".":
+        return False
+    return any(is_default_excluded_dir_name(part) for part in Path(normalized).parts)
+
+
 def is_excluded(rel_path: str, patterns: list[str]) -> bool:
+    if _has_default_excluded_dir_component(rel_path):
+        return True
     if not patterns:
         return False
     normalized = normalize_relpath(rel_path)
@@ -64,6 +87,8 @@ def scan_folder(
                 for entry in it:
                     try:
                         if entry.is_dir(follow_symlinks=False):
+                            if is_default_excluded_dir_name(entry.name):
+                                continue
                             scan_dir(Path(entry.path))
                             continue
                         if not entry.is_file(follow_symlinks=False):

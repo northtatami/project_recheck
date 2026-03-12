@@ -675,3 +675,8 @@ v0.1 では以下を保存する。
 ## v0.1 delta note (2026-03-12, onboarding-refine-2)
 - In brand-new project setup, comparison target folder input now starts empty (no auto-filled user home path).
 - Added clearer target-folder placeholder text and validation wording for missing/invalid target folders.
+
+## v0.1 delta note (2026-03-12, pre-distribution-hardening)
+- Snapshot/scope scanning now applies built-in default directory exclusions by basename: `node_modules`, `.git`, `.venv`, `venv`, `__pycache__`.
+- Snapshot persistence is hardened with atomic JSON writes (`*.tmp` + replace) for `manifest.json` and `index.json`.
+- Stale snapshot temp files (`index.json.tmp`, `manifest.json.tmp`) are ignored/cleaned so partial files are not treated as valid snapshots.
