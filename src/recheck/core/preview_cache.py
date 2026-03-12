@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import logging
 import shutil
 from pathlib import Path
 
@@ -9,6 +11,12 @@ from recheck.core.file_scanner import ScannedFile
 from recheck.core.models import AppSettings, PreviewCacheGeneration
 from recheck.utils.filetype_utils import is_preview_cache_target
 from recheck.utils.path_utils import normalize_relpath, timestamp_id, utc_now_iso
+
+LOGGER = logging.getLogger(__name__)
+_EXPECTED_DELETE_WINERRORS = {5, 32}
+_EXPECTED_DELETE_ERRNOS = {errno.EACCES, errno.EPERM}
+if hasattr(errno, "EBUSY"):
+    _EXPECTED_DELETE_ERRNOS.add(errno.EBUSY)
 
 
 class PreviewCacheStore:
@@ -40,6 +48,13 @@ class PreviewCacheStore:
         path = self._generation_file(generation.generation_id)
         with path.open("w", encoding="utf-8") as handle:
             json.dump(generation.to_dict(), handle, ensure_ascii=False, indent=2)
+
+    def _is_expected_delete_error(self, exc: OSError) -> bool:
+        if isinstance(exc, PermissionError):
+            return True
+        if getattr(exc, "winerror", None) in _EXPECTED_DELETE_WINERRORS:
+            return True
+        return getattr(exc, "errno", None) in _EXPECTED_DELETE_ERRNOS
 
     def _load_generation(self, generation_file: Path) -> PreviewCacheGeneration:
         with generation_file.open("r", encoding="utf-8") as handle:
@@ -105,6 +120,13 @@ class PreviewCacheStore:
         return str(blob)
 
     def prune(self, settings: AppSettings) -> None:
+        skipped_locked_items = 0
+
+        def warn_locked(path: Path, action: str, exc: OSError) -> None:
+            nonlocal skipped_locked_items
+            skipped_locked_items += 1
+            LOGGER.warning("Preview-cache prune skipped %s for locked/inaccessible path: %s (%s)", action, path, exc)
+
         generations = self.list_generations()
         keep = list(generations)
         drop: list[PreviewCacheGeneration] = []
@@ -124,8 +146,14 @@ class PreviewCacheStore:
             size = 0
             for hash_value in hashes:
                 path = self._blob_path(hash_value)
-                if path.exists():
-                    size += path.stat().st_size
+                try:
+                    if path.exists():
+                        size += path.stat().st_size
+                except OSError as exc:
+                    if self._is_expected_delete_error(exc):
+                        warn_locked(path, "size-check", exc)
+                        continue
+                    raise
             return size
 
         refs = referenced_hashes(keep)
@@ -138,7 +166,13 @@ class PreviewCacheStore:
         for generation in drop:
             path = self._generation_file(generation.generation_id)
             if path.exists():
-                path.unlink()
+                try:
+                    path.unlink()
+                except OSError as exc:
+                    if self._is_expected_delete_error(exc):
+                        warn_locked(path, "generation-delete", exc)
+                        continue
+                    raise
 
         refs = referenced_hashes(keep)
         for first_level in self.blobs_dir.glob("*"):
@@ -146,9 +180,24 @@ class PreviewCacheStore:
                 continue
             for blob in first_level.glob("*"):
                 if blob.name not in refs:
-                    blob.unlink(missing_ok=True)
-            if not any(first_level.iterdir()):
-                first_level.rmdir()
+                    try:
+                        blob.unlink(missing_ok=True)
+                    except OSError as exc:
+                        if self._is_expected_delete_error(exc):
+                            warn_locked(blob, "blob-delete", exc)
+                            continue
+                        raise
+            try:
+                if not any(first_level.iterdir()):
+                    first_level.rmdir()
+            except OSError as exc:
+                if self._is_expected_delete_error(exc):
+                    warn_locked(first_level, "cleanup-dir-delete", exc)
+                else:
+                    raise
+
+        if skipped_locked_items:
+            LOGGER.warning("Preview-cache prune completed with %d locked/inaccessible item(s) skipped.", skipped_locked_items)
 
     def cache_size_bytes(self) -> int:
         size = 0

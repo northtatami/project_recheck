@@ -238,7 +238,7 @@ class RecheckMainWindow(QMainWindow):
         self._apply_style()
         self._retranslate_ui()
         self._load_projects()
-        self.preview_cache_store.prune(self.settings)
+        QTimer.singleShot(0, self._prune_preview_cache_startup_non_critical)
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
@@ -246,6 +246,12 @@ class RecheckMainWindow(QMainWindow):
             return
         self._quick_guide_auto_checked = True
         QTimer.singleShot(500, lambda: self._maybe_show_first_run_quick_guide(manual=False))
+
+    def _prune_preview_cache_startup_non_critical(self) -> None:
+        try:
+            self.preview_cache_store.prune(self.settings)
+        except Exception:
+            LOGGER.exception("Preview-cache prune failed during startup; continuing app startup.")
 
     def _t(self, key: str, **kwargs: object) -> str:
         return self.i18n.t(key, **kwargs)
