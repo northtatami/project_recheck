@@ -12,6 +12,7 @@ class DiffTableModel(QAbstractTableModel):
     ENTRY_ROLE = Qt.ItemDataRole.UserRole + 1
     STATUS_ROLE = Qt.ItemDataRole.UserRole + 2
     SEARCH_ROLE = Qt.ItemDataRole.UserRole + 3
+    RELPATH_ROLE = Qt.ItemDataRole.UserRole + 4
 
     def __init__(
         self,
@@ -26,6 +27,7 @@ class DiffTableModel(QAbstractTableModel):
         self._parent_path_display = parent_path_display
         self._entries: list[DiffEntry] = []
         self._headers: list[str] = ["", "", "", "", "", "", ""]
+        self._row_by_key: dict[tuple[str, str, str], int] = {}
         self._status_backgrounds: dict[str, QBrush] = {
             "added": QBrush(QColor("#e9f6ed")),
             "removed": QBrush(QColor("#faecec")),
@@ -101,6 +103,9 @@ class DiffTableModel(QAbstractTableModel):
         if role == self.SEARCH_ROLE:
             return f"{entry.file_name.lower()}\n{entry.relative_path.lower()}"
 
+        if role == self.RELPATH_ROLE:
+            return entry.relative_path
+
         return None
 
     def flags(self, index: QModelIndex) -> Qt.ItemFlags:
@@ -111,6 +116,7 @@ class DiffTableModel(QAbstractTableModel):
     def set_entries(self, entries: list[DiffEntry]) -> None:
         self.beginResetModel()
         self._entries = list(entries)
+        self._row_by_key = {(entry.relative_path, entry.status, entry.file_name): idx for idx, entry in enumerate(self._entries)}
         self.endResetModel()
 
     def set_headers(self, headers: list[str]) -> None:
@@ -124,12 +130,21 @@ class DiffTableModel(QAbstractTableModel):
             return self._entries[row]
         return None
 
+    def source_index_for_key(self, key: tuple[str, str, str]) -> QModelIndex:
+        row = self._row_by_key.get(key)
+        if row is None:
+            return QModelIndex()
+        return self.index(row, 0)
+
 
 class DiffFilterProxyModel(QSortFilterProxyModel):
     def __init__(self) -> None:
         super().__init__()
         self._status_mode = "all"
         self._search_text = ""
+        self._scope_mode = "whole"
+        self._scope_folders: tuple[str, ...] = tuple()
+        self._scope_is_all = True
         self.setDynamicSortFilter(True)
 
     def set_status_mode(self, mode: str) -> None:
@@ -145,12 +160,63 @@ class DiffFilterProxyModel(QSortFilterProxyModel):
         self._search_text = normalized
         self.invalidateFilter()
 
+    @staticmethod
+    def _compact_scope_folders(folders: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = sorted({item.strip().strip("/") for item in folders if item and item.strip()})
+        if not normalized:
+            return tuple()
+        kept: list[str] = []
+        for folder in sorted(normalized, key=len):
+            covered = False
+            for existing in kept:
+                if folder == existing or folder.startswith(f"{existing}/"):
+                    covered = True
+                    break
+            if not covered:
+                kept.append(folder)
+        return tuple(kept)
+
+    def set_scope(self, mode: str, folders: tuple[str, ...]) -> None:
+        scope_mode = "selected" if mode == "selected" else "whole"
+        scope_folders = tuple(folders) if scope_mode == "selected" else tuple()
+        scope_is_all = scope_mode == "whole" or "" in scope_folders
+        if not scope_is_all:
+            scope_folders = self._compact_scope_folders(scope_folders)
+        if self._scope_mode == scope_mode and self._scope_folders == scope_folders and self._scope_is_all == scope_is_all:
+            return
+        self._scope_mode = scope_mode
+        self._scope_folders = scope_folders
+        self._scope_is_all = scope_is_all
+        self.invalidateFilter()
+
     def _status_visible(self, status: str) -> bool:
         if self._status_mode == "all":
             return True
         if self._status_mode == "changed_default":
             return status in {"added", "removed", "modified"}
         return status == self._status_mode
+
+    @staticmethod
+    def _status_sort_rank(status: str) -> int:
+        order = {
+            "added": 0,
+            "removed": 1,
+            "modified": 2,
+            "unchanged": 3,
+        }
+        return order.get(status, 99)
+
+    def _scope_visible(self, rel_path: str) -> bool:
+        if self._scope_is_all:
+            return True
+        if self._scope_mode != "selected":
+            return True
+        if not self._scope_folders:
+            return False
+        for folder in self._scope_folders:
+            if rel_path == folder or rel_path.startswith(f"{folder}/"):
+                return True
+        return False
 
     def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:
         source_model = self.sourceModel()
@@ -162,9 +228,27 @@ class DiffFilterProxyModel(QSortFilterProxyModel):
             return False
         if not self._status_visible(status):
             return False
+        rel_path = index.data(DiffTableModel.RELPATH_ROLE)
+        if not isinstance(rel_path, str):
+            return False
+        if not self._scope_visible(rel_path):
+            return False
         if not self._search_text:
             return True
         search_blob = index.data(DiffTableModel.SEARCH_ROLE)
         if not isinstance(search_blob, str):
             return False
         return self._search_text in search_blob
+
+    def lessThan(self, left: QModelIndex, right: QModelIndex) -> bool:
+        # Keep "all" / default-changed list focused on differences-first ordering.
+        if left.column() == 0 and self._status_mode in {"all", "changed_default"}:
+            left_status = left.data(DiffTableModel.STATUS_ROLE)
+            right_status = right.data(DiffTableModel.STATUS_ROLE)
+            if isinstance(left_status, str) and isinstance(right_status, str):
+                left_rank = self._status_sort_rank(left_status)
+                right_rank = self._status_sort_rank(right_status)
+                if left_rank != right_rank:
+                    return left_rank < right_rank
+                return left.row() < right.row()
+        return super().lessThan(left, right)

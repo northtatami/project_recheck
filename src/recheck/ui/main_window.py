@@ -176,7 +176,7 @@ class RecheckMainWindow(QMainWindow):
         self.visible_entries: list[DiffEntry] = []
         self.current_entry: DiffEntry | None = None
         self.current_status_filter = "all"
-        self._scope_dataset_model_key: tuple[int, str, tuple[str, ...]] | None = None
+        self._scope_dataset_model_key: int | None = None
         self._suppress_selection_events = False
         self.latest_counts = {status: 0 for status in STATUSES}
         self.base_manifest: SnapshotManifest | None = None
@@ -1012,6 +1012,7 @@ class RecheckMainWindow(QMainWindow):
         self.preview_info.setText(self._t("preview.info.empty"))
         self.base_preview.show_file(None, empty_message=self._t("preview.none"), modified_time=None, size=None)
         self.compare_preview.show_file(None, empty_message=self._t("preview.none"), modified_time=None, size=None)
+        self.diff_proxy_model.set_scope("whole", tuple())
         self.diff_proxy_model.set_status_mode("all")
         self.diff_proxy_model.set_search_text("")
         self.diff_table_model.set_entries([])
@@ -1463,6 +1464,16 @@ class RecheckMainWindow(QMainWindow):
     def _status_label(self, status: str) -> str:
         return self._t(f"status.{status}")
 
+    @staticmethod
+    def _status_sort_rank(status: str) -> int:
+        order = {
+            "added": 0,
+            "removed": 1,
+            "modified": 2,
+            "unchanged": 3,
+        }
+        return order.get(status, 99)
+
     def _format_table_timestamp(self, value: str | None) -> str:
         return format_display_timestamp(value)
 
@@ -1486,6 +1497,13 @@ class RecheckMainWindow(QMainWindow):
         for status, button in self.summary_buttons.items():
             button.setText(f"{self._status_label(status)} {counts.get(status, 0)}")
 
+    def _ordered_entries_for_view(self, entries: list[DiffEntry]) -> list[DiffEntry]:
+        # Keep compare semantics unchanged and adjust only UI-visible grouping order.
+        return sorted(
+            entries,
+            key=lambda item: (self._status_sort_rank(item.status), item.relative_path, item.file_name),
+        )
+
     @staticmethod
     def _entry_key(entry: DiffEntry) -> tuple[str, str, str]:
         return (entry.relative_path, entry.status, entry.file_name)
@@ -1498,9 +1516,14 @@ class RecheckMainWindow(QMainWindow):
         self._scope_filter_status_groups = {status: [] for status in STATUSES}
         self._scope_filter_counts = {status: 0 for status in STATUSES}
 
-    def _resolve_scope_filter_bundle(self) -> tuple[list[DiffEntry], dict[str, list[DiffEntry]], dict[str, int]]:
-        mode = self._current_scope_mode()
-        folders = tuple(self._selected_scope_folders()) if mode == "selected" else tuple()
+    def _resolve_scope_filter_bundle(
+        self,
+        *,
+        scope_mode: str,
+        scope_folders: tuple[str, ...],
+    ) -> tuple[list[DiffEntry], dict[str, list[DiffEntry]], dict[str, int]]:
+        mode = scope_mode if scope_mode == "selected" else "whole"
+        folders = scope_folders if mode == "selected" else tuple()
         cache_key = (self._diff_dataset_version, mode, folders)
         if self._scope_filter_cache_key == cache_key:
             return self._scope_filter_cache_entries, self._scope_filter_status_groups, self._scope_filter_counts
@@ -1565,18 +1588,25 @@ class RecheckMainWindow(QMainWindow):
         if self.current_entry:
             current_key = (self.current_entry.relative_path, self.current_entry.status, self.current_entry.file_name)
 
-        scope_filtered, _status_groups, scope_counts = self._resolve_scope_filter_bundle()
+        scope_mode = self._current_scope_mode()
+        scope_folders = tuple(self._selected_scope_folders()) if scope_mode == "selected" else tuple()
+        _scope_entries, _status_groups, scope_counts = self._resolve_scope_filter_bundle(
+            scope_mode=scope_mode,
+            scope_folders=scope_folders,
+        )
         self.latest_counts = dict(scope_counts)
         self._update_summary_counts(self.latest_counts)
         self._update_scope_path_label()
 
-        model_key = self._scope_filter_cache_key
-        if model_key != self._scope_dataset_model_key:
-            self.diff_table_model.set_entries(scope_filtered)
-            self._scope_dataset_model_key = model_key
+        if self._scope_dataset_model_key != self._diff_dataset_version:
+            self.diff_table_model.set_entries(self._ordered_entries_for_view(self.diff_entries))
+            self._scope_dataset_model_key = self._diff_dataset_version
 
+        self.diff_proxy_model.set_scope(scope_mode, scope_folders)
         self.diff_proxy_model.set_status_mode(self.current_status_filter)
         self.diff_proxy_model.set_search_text(self.search_box.text())
+        if self.current_status_filter in {"all", "changed_default"}:
+            self.diff_table.sortByColumn(0, Qt.SortOrder.AscendingOrder)
         visible_count = self.diff_proxy_model.rowCount()
         self.visible_entries = []
 
@@ -1621,12 +1651,13 @@ class RecheckMainWindow(QMainWindow):
     def _find_proxy_row_for_key(self, key: tuple[str, str, str] | None) -> int | None:
         if key is None:
             return None
-        row_count = self.diff_proxy_model.rowCount()
-        for row in range(row_count):
-            entry = self._entry_from_proxy_row(row)
-            if entry and self._entry_key(entry) == key:
-                return row
-        return None
+        source_index = self.diff_table_model.source_index_for_key(key)
+        if not source_index.isValid():
+            return None
+        proxy_index = self.diff_proxy_model.mapFromSource(source_index)
+        if not proxy_index.isValid():
+            return None
+        return proxy_index.row()
 
     def _on_diff_selection_changed(self, *_args) -> None:
         if self._suppress_selection_events:
