@@ -225,6 +225,7 @@ class RecheckMainWindow(QMainWindow):
         self._scope_filter_counts: dict[str, int] = {status: 0 for status in STATUSES}
         self._pending_initial_snapshot_project_id: str | None = None
         self._pending_initial_snapshot_queued_at: float | None = None
+        self._pending_initial_snapshot_wait_for_guide = False
         self._initial_snapshot_prompt_check_scheduled = False
         self._initial_snapshot_prompt_showing = False
         self._quick_guide_overlay: QuickGuideOverlay | None = None
@@ -950,11 +951,15 @@ class RecheckMainWindow(QMainWindow):
     def _queue_initial_snapshot_prompt(self, project_id: str) -> None:
         self._pending_initial_snapshot_project_id = project_id
         self._pending_initial_snapshot_queued_at = perf_counter()
+        self._pending_initial_snapshot_wait_for_guide = not self.settings.quick_guide_completed
+        if self._pending_initial_snapshot_wait_for_guide:
+            QTimer.singleShot(0, lambda: self._maybe_show_first_run_quick_guide(manual=False))
         self._schedule_initial_snapshot_prompt_check(200)
 
     def _clear_pending_initial_snapshot_prompt(self) -> None:
         self._pending_initial_snapshot_project_id = None
         self._pending_initial_snapshot_queued_at = None
+        self._pending_initial_snapshot_wait_for_guide = False
 
     def _schedule_initial_snapshot_prompt_check(self, delay_ms: int = 200) -> None:
         if not self._pending_initial_snapshot_project_id:
@@ -981,17 +986,31 @@ class RecheckMainWindow(QMainWindow):
             return
         if self._initial_snapshot_prompt_showing:
             return
+
+        if self._pending_initial_snapshot_wait_for_guide:
+            if self.settings.quick_guide_completed:
+                self._pending_initial_snapshot_wait_for_guide = False
+            else:
+                if not (self._quick_guide_overlay and self._quick_guide_overlay.isVisible()):
+                    self._maybe_show_first_run_quick_guide(manual=False)
+                queued_at = self._pending_initial_snapshot_queued_at
+                # Fallback: if guide auto-run does not become active for a while,
+                # continue with snapshot onboarding once UI is ready.
+                if queued_at is not None and (perf_counter() - queued_at) < 5.0:
+                    self._schedule_initial_snapshot_prompt_check(300)
+                    return
+                self._pending_initial_snapshot_wait_for_guide = False
+
         if self._initial_snapshot_prompt_blocked():
             self._schedule_initial_snapshot_prompt_check(250)
             return
 
         selected_project_id = self.project_selector.currentData()
+        if selected_project_id and selected_project_id != project_id:
+            self._clear_pending_initial_snapshot_prompt()
+            return
         if selected_project_id != project_id:
-            queued_at = self._pending_initial_snapshot_queued_at
-            if queued_at is not None and (perf_counter() - queued_at) >= 2.0:
-                self._clear_pending_initial_snapshot_prompt()
-            else:
-                self._schedule_initial_snapshot_prompt_check(250)
+            self._schedule_initial_snapshot_prompt_check(250)
             return
         if not self.current_project or self.current_project.project_id != project_id:
             self._schedule_initial_snapshot_prompt_check(250)
@@ -2603,12 +2622,6 @@ class RecheckMainWindow(QMainWindow):
     def _maybe_show_first_run_quick_guide(self, *, manual: bool) -> None:
         if self._quick_guide_overlay and self._quick_guide_overlay.isVisible():
             return
-        if self._pending_initial_snapshot_project_id:
-            if not manual:
-                QTimer.singleShot(700, lambda: self._maybe_show_first_run_quick_guide(manual=False))
-            else:
-                self.statusBar().showMessage(self._t("guide.msg.wait_modal"), 3000)
-            return
         if not manual and self.settings.quick_guide_completed:
             return
         if not self.isVisible():
@@ -2642,6 +2655,9 @@ class RecheckMainWindow(QMainWindow):
             self.statusBar().showMessage(self._t("guide.msg.completed"), 3000)
         else:
             self.statusBar().showMessage(self._t("guide.msg.skipped"), 3000)
+        if self._pending_initial_snapshot_project_id:
+            self._pending_initial_snapshot_wait_for_guide = False
+            self._schedule_initial_snapshot_prompt_check(0)
 
     def _select_snapshots_by_date(self) -> None:
         if not self.snapshots:
