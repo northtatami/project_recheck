@@ -475,3 +475,7 @@ v0.1 MVP は以下を満たしたら完了とする。
 - Adjusted setup dialog wording for first-time clarity (`比較対象フォルダ` label and concise purpose/help text).
 - Split quick-guide final action into two steps (snapshot selection vs compare execution) to reduce ambiguity.
 - Tightened spotlight targeting to the exact controls for selection and compare execution.
+
+## v0.1 delta note (2026-03-12, onboarding-refine-2)
+- In brand-new project setup, comparison target folder input now starts empty (no auto-filled user home path).
+- Added clearer target-folder placeholder text and validation wording for missing/invalid target folders.

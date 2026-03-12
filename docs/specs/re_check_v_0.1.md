@@ -671,3 +671,7 @@ v0.1 では以下を保存する。
 - Quick guide was refined from 4 to 5 focused steps:
   - Base/Compare snapshot selection and Compare execution are now separated.
 - Spotlight targets were narrowed so the snapshot-selection step highlights only Base/Compare selectors, and the final step highlights only the Compare button.
+
+## v0.1 delta note (2026-03-12, onboarding-refine-2)
+- In brand-new project setup, comparison target folder input now starts empty (no auto-filled user home path).
+- Added clearer target-folder placeholder text and validation wording for missing/invalid target folders.

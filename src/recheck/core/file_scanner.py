@@ -3,6 +3,7 @@ from __future__ import annotations
 import fnmatch
 from dataclasses import dataclass
 from datetime import datetime
+import os
 from pathlib import Path
 
 from recheck.utils.path_utils import normalize_relpath
@@ -36,7 +37,17 @@ def is_excluded(rel_path: str, patterns: list[str]) -> bool:
     return False
 
 
-def scan_folder(root_folder: str, exclude_patterns: list[str] | None = None) -> list[ScannedFile]:
+def _record_skip(skipped_paths: list[str] | None, path: str) -> None:
+    if skipped_paths is not None:
+        skipped_paths.append(path)
+
+
+def scan_folder(
+    root_folder: str,
+    exclude_patterns: list[str] | None = None,
+    skipped_paths: list[str] | None = None,
+) -> list[ScannedFile]:
+    # skipped_paths: optional list to record paths skipped due to access errors.
     root = Path(root_folder)
     patterns = exclude_patterns or []
     if not root.exists():
@@ -45,20 +56,56 @@ def scan_folder(root_folder: str, exclude_patterns: list[str] | None = None) -> 
         raise NotADirectoryError(f"Root folder is not a directory: {root_folder}")
 
     results: list[ScannedFile] = []
-    for absolute_path in root.rglob("*"):
-        if absolute_path.is_dir():
-            continue
-        relative_path = normalize_relpath(str(absolute_path.relative_to(root)))
-        if is_excluded(relative_path, patterns):
-            continue
-        stat = absolute_path.stat()
-        results.append(
-            ScannedFile(
-                relative_path=relative_path,
-                file_name=absolute_path.name,
-                size=stat.st_size,
-                modified_time=datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                absolute_path=str(absolute_path),
-            )
-        )
+    root_str = str(root)
+
+    def scan_dir(current: Path) -> None:
+        try:
+            with os.scandir(current) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            scan_dir(Path(entry.path))
+                            continue
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                        relative_path = normalize_relpath(str(Path(entry.path).relative_to(root)))
+                        if is_excluded(relative_path, patterns):
+                            continue
+                        try:
+                            stat = entry.stat(follow_symlinks=False)
+                        except PermissionError:
+                            _record_skip(skipped_paths, entry.path)
+                            continue
+                        except OSError as exc:
+                            if getattr(exc, "winerror", None) in {5, 32, 1314, 1920}:
+                                _record_skip(skipped_paths, entry.path)
+                                continue
+                            raise
+                        results.append(
+                            ScannedFile(
+                                relative_path=relative_path,
+                                file_name=entry.name,
+                                size=stat.st_size,
+                                modified_time=datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                                absolute_path=entry.path,
+                            )
+                        )
+                    except PermissionError:
+                        _record_skip(skipped_paths, entry.path)
+                        continue
+                    except OSError as exc:
+                        if getattr(exc, "winerror", None) in {5, 32, 1314, 1920}:
+                            _record_skip(skipped_paths, entry.path)
+                            continue
+                        raise
+        except PermissionError:
+            _record_skip(skipped_paths, str(current))
+            return
+        except OSError as exc:
+            if getattr(exc, "winerror", None) in {5, 32, 1314, 1920}:
+                _record_skip(skipped_paths, str(current))
+                return
+            raise
+
+    scan_dir(Path(root_str))
     return results

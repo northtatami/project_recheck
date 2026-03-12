@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import csv
 import logging
+import os
 import traceback
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -143,18 +144,23 @@ class _TaskRunner(QRunnable):
         self.signals = _TaskSignals()
 
     def run(self) -> None:
+        result = None
+        error_text: str | None = None
         try:
             result = self.fn()
         except Exception:
-            try:
-                self.signals.failed.emit(self.task_id, traceback.format_exc())
-            except RuntimeError:
-                pass
-            return
-        try:
-            self.signals.finished.emit(self.task_id, result)
-        except RuntimeError:
-            pass
+            error_text = traceback.format_exc()
+        finally:
+            if error_text is not None:
+                try:
+                    self.signals.failed.emit(self.task_id, error_text)
+                except RuntimeError:
+                    pass
+            else:
+                try:
+                    self.signals.finished.emit(self.task_id, result)
+                except RuntimeError:
+                    pass
 
 
 class RecheckMainWindow(QMainWindow):
@@ -218,6 +224,9 @@ class RecheckMainWindow(QMainWindow):
         self._scope_filter_status_groups: dict[str, list[DiffEntry]] = {status: [] for status in STATUSES}
         self._scope_filter_counts: dict[str, int] = {status: 0 for status in STATUSES}
         self._pending_initial_snapshot_project_id: str | None = None
+        self._pending_initial_snapshot_queued_at: float | None = None
+        self._initial_snapshot_prompt_check_scheduled = False
+        self._initial_snapshot_prompt_showing = False
         self._quick_guide_overlay: QuickGuideOverlay | None = None
         self._quick_guide_auto_checked = False
 
@@ -712,6 +721,15 @@ class RecheckMainWindow(QMainWindow):
         if active and message:
             self.statusBar().showMessage(message)
 
+    def _notify_scan_skipped(self, skipped: list[str]) -> None:
+        if not skipped:
+            return
+        LOGGER.warning("Skipped %s paths due to access restrictions.", len(skipped))
+        if self.statusBar().currentMessage():
+            QTimer.singleShot(1500, lambda: self.statusBar().showMessage(self._t("msg.scan_skipped"), 8000))
+            return
+        self.statusBar().showMessage(self._t("msg.scan_skipped"), 8000)
+
     def _start_background_task(
         self,
         *,
@@ -772,17 +790,33 @@ class RecheckMainWindow(QMainWindow):
         on_success(payload)
 
     def _on_background_task_failed(self, task_id: str, error_text: str) -> None:
-        callbacks = self._task_callbacks.pop(task_id, None)
-        status_message = self._task_messages.pop(task_id, self._t("msg.processing_error"))
-        self._close_task_progress_dialog(task_id)
-        if self._busy_task_id == task_id:
-            self._busy_task_id = None
-            self._set_busy(False)
+        try:
+            callbacks = self._task_callbacks.pop(task_id, None)
+            status_message = self._task_messages.pop(task_id, self._t("msg.processing_error"))
+            self._close_task_progress_dialog(task_id)
+            if self._busy_task_id == task_id:
+                self._busy_task_id = None
+                self._set_busy(False)
 
-        if callbacks and callbacks[1]:
-            callbacks[1](error_text)
-        else:
-            QMessageBox.warning(self, self._t("dialog.validation"), f"{status_message}\n\n{error_text.splitlines()[-1]}")
+            if callbacks and callbacks[1]:
+                callbacks[1](error_text)
+            else:
+                QMessageBox.warning(
+                    self,
+                    self._t("dialog.validation"),
+                    f"{status_message}\n\n{error_text.splitlines()[-1]}",
+                )
+        finally:
+            self._recover_ui_after_task_failure()
+
+    def _recover_ui_after_task_failure(self) -> None:
+        if self._scope_build_active:
+            self._scope_build_active = False
+            self._scope_build_token += 1
+            self._scope_build_queue.clear()
+            self.scope_tree.blockSignals(False)
+            self.scope_tree.setEnabled(True)
+        self._set_primary_controls_enabled(True)
 
     def _load_projects(self, *, preferred_project_id: str | None = None) -> None:
         projects = self.project_store.list_projects()
@@ -806,23 +840,66 @@ class RecheckMainWindow(QMainWindow):
         self._on_project_changed(index)
 
     @staticmethod
-    def _scan_scope_paths(root_folder: str) -> list[str]:
+    def _scan_scope_paths(root_folder: str, skipped_paths: list[str] | None = None) -> list[str]:
         root_path = Path(root_folder)
         if not root_path.exists():
             return []
+
+        def record_skip(path: str) -> None:
+            if skipped_paths is not None:
+                skipped_paths.append(path)
+
         paths: list[str] = []
-        for directory in root_path.rglob("*"):
-            if not directory.is_dir():
-                continue
-            paths.append(normalize_relpath(str(directory.relative_to(root_path))))
+
+        def scan_dir(current: Path) -> None:
+            try:
+                with os.scandir(current) as it:
+                    for entry in it:
+                        try:
+                            if not entry.is_dir(follow_symlinks=False):
+                                continue
+                            rel = normalize_relpath(str(Path(entry.path).relative_to(root_path)))
+                            if rel and rel != ".":
+                                paths.append(rel)
+                            scan_dir(Path(entry.path))
+                        except PermissionError:
+                            record_skip(entry.path)
+                            continue
+                        except OSError as exc:
+                            if getattr(exc, "winerror", None) in {5, 32, 1314, 1920}:
+                                record_skip(entry.path)
+                                continue
+                            raise
+            except PermissionError:
+                record_skip(str(current))
+                return
+            except OSError as exc:
+                if getattr(exc, "winerror", None) in {5, 32, 1314, 1920}:
+                    record_skip(str(current))
+                    return
+                raise
+
+        scan_dir(root_path)
         paths.sort()
         return paths
+
+    def _scan_scope_paths_bundle(self, root_folder: str) -> dict[str, object]:
+        skipped: list[str] = []
+        paths = self._scan_scope_paths(root_folder, skipped)
+        return {"paths": paths, "skipped": skipped}
 
     def _task_load_project_bundle(self, project_id: str) -> dict[str, object]:
         project = self.project_store.load_project(project_id)
         snapshots = self.snapshot_store.list_snapshots(project)
-        scope_paths = self._scan_scope_paths(project.root_folder)
-        return {"project": project, "snapshots": snapshots, "scope_paths": scope_paths}
+        scope_skipped: list[str] = []
+        # scope_skipped: directories skipped while building the scope tree.
+        scope_paths = self._scan_scope_paths(project.root_folder, scope_skipped)
+        return {
+            "project": project,
+            "snapshots": snapshots,
+            "scope_paths": scope_paths,
+            "scope_skipped": scope_skipped,
+        }
 
     def _task_load_history_bundle(self, project_id: str) -> dict[str, object]:
         project = self.project_store.load_project(project_id)
@@ -850,10 +927,9 @@ class RecheckMainWindow(QMainWindow):
                 self.base_selector.setCurrentIndex(-1)
             if self.compare_selector.count() == 0:
                 self.compare_selector.setCurrentIndex(-1)
-            self._pending_initial_snapshot_project_id = project.project_id
+            self._queue_initial_snapshot_prompt(project.project_id)
             created_message = self._t("msg.project_created_no_snapshot", name=project.name)
             QTimer.singleShot(0, lambda msg=created_message: self.statusBar().showMessage(msg, 8000))
-            QTimer.singleShot(200, self._maybe_prompt_initial_snapshot_save)
             return
 
         if initial:
@@ -869,23 +945,60 @@ class RecheckMainWindow(QMainWindow):
             else:
                 self.close()
 
+    def _queue_initial_snapshot_prompt(self, project_id: str) -> None:
+        self._pending_initial_snapshot_project_id = project_id
+        self._pending_initial_snapshot_queued_at = perf_counter()
+        self._schedule_initial_snapshot_prompt_check(200)
+
+    def _clear_pending_initial_snapshot_prompt(self) -> None:
+        self._pending_initial_snapshot_project_id = None
+        self._pending_initial_snapshot_queued_at = None
+
+    def _schedule_initial_snapshot_prompt_check(self, delay_ms: int = 200) -> None:
+        if not self._pending_initial_snapshot_project_id:
+            return
+        if self._initial_snapshot_prompt_check_scheduled:
+            return
+        self._initial_snapshot_prompt_check_scheduled = True
+        QTimer.singleShot(max(0, delay_ms), self._run_initial_snapshot_prompt_check)
+
+    def _run_initial_snapshot_prompt_check(self) -> None:
+        self._initial_snapshot_prompt_check_scheduled = False
+        self._maybe_prompt_initial_snapshot_save()
+
+    def _initial_snapshot_prompt_blocked(self) -> bool:
+        if self._is_busy():
+            return True
+        if self._quick_guide_overlay and self._quick_guide_overlay.isVisible():
+            return True
+        return QApplication.activeModalWidget() is not None
+
     def _maybe_prompt_initial_snapshot_save(self) -> None:
         project_id = self._pending_initial_snapshot_project_id
         if not project_id:
             return
-        if self._is_busy():
-            QTimer.singleShot(200, self._maybe_prompt_initial_snapshot_save)
+        if self._initial_snapshot_prompt_showing:
             return
-        if not self.current_project or self.current_project.project_id != project_id:
-            if self.project_selector.currentData() != project_id:
-                self._pending_initial_snapshot_project_id = None
-                return
-            QTimer.singleShot(200, self._maybe_prompt_initial_snapshot_save)
-            return
-        if self.snapshots:
-            self._pending_initial_snapshot_project_id = None
+        if self._initial_snapshot_prompt_blocked():
+            self._schedule_initial_snapshot_prompt_check(250)
             return
 
+        selected_project_id = self.project_selector.currentData()
+        if selected_project_id != project_id:
+            queued_at = self._pending_initial_snapshot_queued_at
+            if queued_at is not None and (perf_counter() - queued_at) >= 2.0:
+                self._clear_pending_initial_snapshot_prompt()
+            else:
+                self._schedule_initial_snapshot_prompt_check(250)
+            return
+        if not self.current_project or self.current_project.project_id != project_id:
+            self._schedule_initial_snapshot_prompt_check(250)
+            return
+        if self.snapshots:
+            self._clear_pending_initial_snapshot_prompt()
+            return
+
+        self._initial_snapshot_prompt_showing = True
         message = QMessageBox(self)
         message.setIcon(QMessageBox.Icon.Question)
         message.setWindowTitle(self._t("dialog.initial_snapshot.title"))
@@ -893,10 +1006,13 @@ class RecheckMainWindow(QMainWindow):
         save_button = message.addButton(self._t("dialog.initial_snapshot.save"), QMessageBox.ButtonRole.AcceptRole)
         later_button = message.addButton(self._t("dialog.initial_snapshot.later"), QMessageBox.ButtonRole.RejectRole)
         message.setDefaultButton(save_button)
-        message.exec()
+        try:
+            message.exec()
+        finally:
+            self._initial_snapshot_prompt_showing = False
 
         clicked = message.clickedButton()
-        self._pending_initial_snapshot_project_id = None
+        self._clear_pending_initial_snapshot_prompt()
         if clicked == save_button:
             self._start_snapshot_save(
                 name=self.current_project.name,
@@ -940,6 +1056,9 @@ class RecheckMainWindow(QMainWindow):
             scope_paths = bundle.get("scope_paths", [])
             if isinstance(scope_paths, list):
                 self._apply_scope_tree_paths([str(item) for item in scope_paths])
+            scope_skipped = bundle.get("scope_skipped", [])
+            if isinstance(scope_skipped, list):
+                self._notify_scan_skipped([str(item) for item in scope_skipped])
 
             snapshots = bundle.get("snapshots", [])
             if isinstance(snapshots, list):
@@ -1090,23 +1209,31 @@ class RecheckMainWindow(QMainWindow):
     def _task_save_snapshot(self, project_id: str, name: str, source_folder: str | None) -> dict[str, object]:
         project = self.project_store.load_project(project_id)
         settings_copy = copy.deepcopy(self.settings)
+        # scan_warnings: paths skipped during snapshot file scanning.
+        scan_warnings: list[str] = []
         snapshot = self.snapshot_store.save_snapshot(
             project,
             settings=settings_copy,
             name=name,
             source_folder=source_folder,
+            scan_warnings=scan_warnings,
         )
         snapshots = self.snapshot_store.list_snapshots(project)
         root_path = Path(project.root_folder).resolve()
         source_path = Path(source_folder or project.root_folder).resolve()
         scope_paths: list[str] | None = None
+        scope_skipped: list[str] | None = None
         if source_path == root_path:
-            scope_paths = self._scan_scope_paths(project.root_folder)
+            # scope_skipped: directories skipped while rebuilding the scope tree after snapshot.
+            scope_skipped = []
+            scope_paths = self._scan_scope_paths(project.root_folder, scope_skipped)
         return {
             "project_id": project_id,
             "snapshot": snapshot,
             "snapshots": snapshots,
             "scope_paths": scope_paths,
+            "scope_skipped": scope_skipped,
+            "scan_warnings": scan_warnings,
             "is_external_source": source_path != root_path,
         }
 
@@ -1157,12 +1284,17 @@ class RecheckMainWindow(QMainWindow):
         scope_paths = bundle.get("scope_paths")
         if isinstance(scope_paths, list):
             self._apply_scope_tree_paths([str(item) for item in scope_paths])
-
         self._history_dirty = True
         if bool(bundle.get("is_external_source")):
             self.statusBar().showMessage(self._t("msg.external_snapshot_created", name=snapshot.name))
-            return
-        self.statusBar().showMessage(self._t("msg.snapshot_saved", name=snapshot.name))
+        else:
+            self.statusBar().showMessage(self._t("msg.snapshot_saved", name=snapshot.name))
+        scope_skipped = bundle.get("scope_skipped")
+        if isinstance(scope_skipped, list):
+            self._notify_scan_skipped([str(item) for item in scope_skipped])
+        scan_warnings = bundle.get("scan_warnings")
+        if isinstance(scan_warnings, list):
+            self._notify_scan_skipped([str(item) for item in scan_warnings])
 
     def _current_scope_mode(self) -> str:
         if self.mode_selected.isChecked():
@@ -1267,10 +1399,7 @@ class RecheckMainWindow(QMainWindow):
     def _task_is_current_root_unsaved(self, project_id: str) -> bool:
         project = self.project_store.load_project(project_id)
         root = Path(project.root_folder).resolve()
-        try:
-            current_scan = scan_folder(str(root), project.exclude_rules)
-        except Exception:
-            return False
+        current_scan = scan_folder(str(root), project.exclude_rules)
         current_map = {item.relative_path: (item.size, item.modified_time) for item in current_scan}
         snapshots = self.snapshot_store.list_snapshots(project)
 
@@ -1344,16 +1473,23 @@ class RecheckMainWindow(QMainWindow):
     ) -> dict[str, object]:
         project = self.project_store.load_project(project_id)
         settings_copy = copy.deepcopy(self.settings)
+        # scan_warnings: paths skipped during snapshot file scanning.
+        scan_warnings: list[str] = []
         snapshot = self.snapshot_store.save_snapshot(
             project,
             settings=settings_copy,
             name=f"compare_{project.name}",
             source_folder=project.root_folder,
+            scan_warnings=scan_warnings,
         )
         payload = self._task_compare(project_id, base_id, snapshot.snapshot_id, scope_mode, scope_folders)
         payload["saved_snapshot_id"] = snapshot.snapshot_id
         payload["snapshots"] = self.snapshot_store.list_snapshots(project)
-        payload["scope_paths"] = self._scan_scope_paths(project.root_folder)
+        # scope_skipped: directories skipped while rebuilding the scope tree after save+compare.
+        scope_skipped: list[str] = []
+        payload["scope_paths"] = self._scan_scope_paths(project.root_folder, scope_skipped)
+        payload["scope_skipped"] = scope_skipped
+        payload["scan_warnings"] = scan_warnings
         return payload
 
     def _start_compare_task(
@@ -1440,6 +1576,12 @@ class RecheckMainWindow(QMainWindow):
         scope_paths = bundle.get("scope_paths")
         if isinstance(scope_paths, list):
             self._apply_scope_tree_paths([str(item) for item in scope_paths])
+        scope_skipped = bundle.get("scope_skipped")
+        if isinstance(scope_skipped, list):
+            self._notify_scan_skipped([str(item) for item in scope_skipped])
+        scan_warnings = bundle.get("scan_warnings")
+        if isinstance(scan_warnings, list):
+            self._notify_scan_skipped([str(item) for item in scan_warnings])
 
         if isinstance(csv_path, str):
             self.last_compare_csv_path = csv_path
@@ -1938,13 +2080,18 @@ class RecheckMainWindow(QMainWindow):
         def _on_loaded(payload: object) -> None:
             if not self.current_project or self.current_project.project_id != project_id:
                 return
-            paths = payload if isinstance(payload, list) else []
-            self._apply_scope_tree_paths([str(item) for item in paths])
+            bundle = payload if isinstance(payload, dict) else {}
+            paths = bundle.get("paths", [])
+            if isinstance(paths, list):
+                self._apply_scope_tree_paths([str(item) for item in paths])
+            skipped = bundle.get("skipped", [])
+            if isinstance(skipped, list):
+                self._notify_scan_skipped([str(item) for item in skipped])
 
         self._start_background_task(
             task_name="scope_refresh",
             status_message=self._t("msg.loading_scope_tree"),
-            fn=lambda root=root_folder: self._scan_scope_paths(root),
+            fn=lambda root=root_folder: self._scan_scope_paths_bundle(root),
             on_success=_on_loaded,
         )
 
@@ -2424,7 +2571,11 @@ class RecheckMainWindow(QMainWindow):
             QuickGuideStep(
                 title=self._t("guide.step.project.title"),
                 message=self._t("guide.step.project.body"),
-                target_rect=lambda: rect_from_widgets(self, [self.project_selector, self.project_menu_button], padding=6),
+                target_rect=lambda: rect_from_widgets(
+                    self,
+                    [self.project_label, self.project_selector, self.project_menu_button],
+                    padding=6,
+                ),
             ),
             QuickGuideStep(
                 title=self._t("guide.step.snapshot.title"),
@@ -2436,7 +2587,7 @@ class RecheckMainWindow(QMainWindow):
                 message=self._t("guide.step.snapshot_select.body"),
                 target_rect=lambda: rect_from_widgets(
                     self,
-                    [self.base_selector, self.compare_selector],
+                    [self.base_label, self.base_selector, self.compare_label, self.compare_selector],
                     padding=8,
                 ),
             ),
@@ -2449,6 +2600,12 @@ class RecheckMainWindow(QMainWindow):
 
     def _maybe_show_first_run_quick_guide(self, *, manual: bool) -> None:
         if self._quick_guide_overlay and self._quick_guide_overlay.isVisible():
+            return
+        if self._pending_initial_snapshot_project_id:
+            if not manual:
+                QTimer.singleShot(700, lambda: self._maybe_show_first_run_quick_guide(manual=False))
+            else:
+                self.statusBar().showMessage(self._t("guide.msg.wait_modal"), 3000)
             return
         if not manual and self.settings.quick_guide_completed:
             return

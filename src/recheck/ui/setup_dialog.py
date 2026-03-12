@@ -34,7 +34,7 @@ class SetupDialog(QDialog):
         self.resize(600, 240)
 
         values = initial_values or {}
-        default_root = values.get("root_folder") or str(Path.home())
+        default_root = values.get("root_folder", "")
         default_snapshot = values.get("snapshot_dir") or str(Path.home() / "AppData" / "Local" / "ReCheck" / "snapshots")
 
         layout = QVBoxLayout(self)
@@ -50,6 +50,7 @@ class SetupDialog(QDialog):
         form.addRow("", self.project_name)
 
         self.root_folder = QLineEdit(default_root)
+        self.root_folder.setPlaceholderText(self._tr("dialog.setup.root_folder_placeholder"))
         form.addRow("", self._with_browse(self.root_folder, self._browse_root))
 
         self.snapshot_dir = QLineEdit(default_snapshot)

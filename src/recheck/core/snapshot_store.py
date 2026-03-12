@@ -51,7 +51,9 @@ class SnapshotStore:
         settings: AppSettings,
         name: str | None = None,
         source_folder: str | None = None,
+        scan_warnings: list[str] | None = None,
     ) -> SnapshotRecord:
+        # scan_warnings: populated with paths skipped during snapshot scanning.
         snapshot_id = timestamp_id("s")
         created_at = utc_now_iso()
         snapshot_name = name.strip() if name and name.strip() else snapshot_id
@@ -60,7 +62,7 @@ class SnapshotStore:
         snapshot_root = self._snapshot_folder(project, snapshot_id)
         snapshot_root.mkdir(parents=True, exist_ok=True)
 
-        scanned_files = scan_folder(snapshot_source, project.exclude_rules)
+        scanned_files = scan_folder(snapshot_source, project.exclude_rules, skipped_paths=scan_warnings)
         generation = self.preview_cache_store.cache_snapshot_files(
             snapshot_id=snapshot_id,
             source_folder=snapshot_source,
